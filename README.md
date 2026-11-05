@@ -49,11 +49,12 @@ with Flux (GitOps) built in.
   Logs are fetched only for the pod under the cursor.
 - **`kwarn`**: only Warning events (OOMKilled, BackOff, probes, image pulls),
   deduplicated. Also the bottom pane of the k9s layout.
-- **`krun`**: run a command in every pod of a workload on several clusters at
-  once — `krun nginx -- nginx -s reload`. It lists the matching Deployments,
-  StatefulSets and DaemonSets on every cluster (names may differ per cluster);
-  mark the ones you want (space, ctrl+a for all shown), or just press enter for
-  one. Production asks for confirmation once.
+- **`krun`**: run a command in every pod of workloads on several clusters at
+  once. `krun` opens a picker with every Deployment, StatefulSet and DaemonSet
+  of every cluster (names may differ per cluster): type to filter, mark with
+  space (ctrl+a marks all shown) or just press enter for one, then type the
+  command. `krun nginx -- nginx -s reload` skips the questions when only one
+  workload matches. Production asks once, with a y/N.
 - **`klogs`**, **`kexec`**, **`kpf`**: pick a pod or service and follow logs,
   open a shell in it, or port-forward it — in a split next to your shell.
 
@@ -149,7 +150,7 @@ from the context name.
 | `kwhy [filter]` | ask Claude why a pod is unhealthy |
 | `kstatus [-w]` | cluster health on one screen (`-w`: refresh every 30s) |
 | `kjobs [-n] [failed\|running\|done\|suspended\|cron] [filter]` | Jobs and CronJobs; enter: logs, run now, rerun, suspend/resume, delete |
-| `krun [-c container] NAME -- CMD...` | run CMD in every pod of the workloads you mark, on any cluster |
+| `krun [-c container] [name] [-- CMD...]` | pick workloads on any cluster, run CMD in all their pods |
 | `kfail [-n] [filter]` | failing pods (all namespaces; `-n` this namespace) with events and last logs; enter: logs, why, shell, describe |
 | `kwarn [-n]` | stream Warning events (all namespaces; `-n` this namespace) |
 | `klogs [filter]` | follow a pod's logs in a split |

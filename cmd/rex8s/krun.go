@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,15 +14,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vitalbh/rex8s/internal/guard"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
-// krun runs a command in every pod of a workload, on every cluster that has
-// it: `krun nginx -- nginx -s reload`. The workload is found by name
-// (Deployments, StatefulSets, DaemonSets, all namespaces); production clusters
-// ask for confirmation once for the whole run.
+// krun runs a command in every pod of the workloads you pick, on any cluster:
+//
+//	krun                         picker with every workload of every cluster
+//	krun nginx                   the same, filtered by "nginx"
+//	krun nginx -- nginx -s reload
+//
+// Workloads are Deployments, StatefulSets and DaemonSets, all namespaces; the
+// command is asked for after the pick when not given. Production clusters ask
+// for confirmation once for the whole run.
 func (a *app) krun(args []string) error {
 	filter, container, command, err := parseKrunArgs(args)
 	if err != nil {
@@ -37,17 +42,18 @@ func (a *app) krun(args []string) error {
 	}
 	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
 
-	fmt.Fprintln(os.Stderr, tui.Dim.Render(fmt.Sprintf("looking for %q in %d clusters…", filter, len(clusters))))
-	found, skipped := a.findWorkloads(k, clusters, filter)
+	var skipped []string
+	targets, err := a.pickTargets(k, clusters, filter, &skipped)
 	for _, s := range skipped {
 		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
 	}
-	if len(found) == 0 {
-		return fmt.Errorf("no deployment, statefulset or daemonset matching %q", filter)
-	}
-	targets, err := pickTargets(found, filter)
 	if err != nil || len(targets) == 0 {
 		return err
+	}
+	if len(command) == 0 {
+		if command = askCommand(targets); len(command) == 0 {
+			return nil
+		}
 	}
 
 	// the pods of each marked workload
@@ -88,11 +94,10 @@ func (a *app) krun(args []string) error {
 		}
 		fmt.Printf("  %-10s %s %s/%s · %d pod(s)%s\n", t.c.Short, kube.ShortKind(t.Kind), t.Namespace, t.Name, perTarget[t.key()], tag)
 	}
-	if len(prod) > 0 && os.Getenv("REX8S_FORCE") == "" {
-		if !guard.Confirm(strings.Join(prod, "+"), "kubectl exec -- "+cmdText,
-			fmt.Sprintf("runs in %d pod(s) of %d workload(s)", len(pods), len(targets))) {
-			return nil
-		}
+	sort.Strings(prod)
+	if len(prod) > 0 && os.Getenv("REX8S_FORCE") == "" && !confirmRun(cmdText, len(pods), prod) {
+		fmt.Fprintln(os.Stderr, "cancelled.")
+		return nil
 	}
 
 	// run, at most 8 at a time; print in plan order
@@ -143,15 +148,19 @@ func (a *app) krun(args []string) error {
 	return nil
 }
 
-// parseKrunArgs: krun [-c CONTAINER] FILTER -- CMD...  ("--" optional).
+// parseKrunArgs: krun [-c CONTAINER] [FILTER] [-- CMD...] ("--" optional
+// when FILTER is given). Filter and command may be empty: the picker and a
+// prompt ask for them.
 func parseKrunArgs(args []string) (filter, container string, command []string, err error) {
-	usage := errors.New("usage: krun [-c container] NAME -- COMMAND...   e.g. krun nginx -- nginx -s reload")
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
 		case a == "--":
 			command = args[i+1:]
 			i = len(args)
-		case a == "-c" && i+1 < len(args) && filter == "":
+		case a == "-c":
+			if i+1 >= len(args) {
+				return "", "", nil, errors.New("-c needs a container name")
+			}
 			container = args[i+1]
 			i++
 		case filter == "":
@@ -161,10 +170,57 @@ func parseKrunArgs(args []string) (filter, container string, command []string, e
 			i = len(args)
 		}
 	}
-	if filter == "" || len(command) == 0 {
-		return "", "", nil, usage
-	}
 	return filter, container, command, nil
+}
+
+// confirmRun: a y/N question, for runs that touch production (the plan with
+// every workload and pod count is printed right above it).
+func confirmRun(cmdText string, pods int, prod []string) bool {
+	fmt.Fprintf(os.Stderr, "\n%s %s %s %s",
+		tui.Prod.Render(" PROD "),
+		fmt.Sprintf("Run %q in %d pod(s) on", cmdText, pods),
+		tui.Bold.Render(strings.Join(prod, ", "))+"?",
+		tui.Dim.Render("[y/N] "))
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return false
+	}
+	defer tty.Close()
+	ans, _ := bufio.NewReader(tty).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(ans)) {
+	case "y", "yes", "s", "sim":
+		return true
+	}
+	return false
+}
+
+// askCommand prompts for the command after the pick ("" cancels).
+func askCommand(targets []target) []string {
+	fmt.Fprintf(os.Stderr, "%s %s\n", tui.Bold.Render("Command to run in"), describeTargets(targets))
+	fmt.Fprint(os.Stderr, tui.Dim.Render("  e.g. nginx -s reload · empty cancels")+"\n  > ")
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return nil
+	}
+	defer tty.Close()
+	line, _ := bufio.NewReader(tty).ReadString('\n')
+	return strings.Fields(strings.TrimSpace(line))
+}
+
+func describeTargets(ts []target) string {
+	if len(ts) == 1 {
+		t := ts[0]
+		return fmt.Sprintf("%s %s/%s on %s", kube.ShortKind(t.Kind), t.Namespace, t.Name, t.c.Short)
+	}
+	seen := map[string]bool{}
+	var cs []string
+	for _, t := range ts {
+		if !seen[t.c.Short] {
+			seen[t.c.Short] = true
+			cs = append(cs, t.c.Short)
+		}
+	}
+	return fmt.Sprintf("%d workloads on %s", len(ts), strings.Join(cs, ", "))
 }
 
 // uniqueClusters drops aliases: contexts pointing at the same server.
@@ -233,7 +289,7 @@ func (a *app) findWorkloads(k string, clusters []kube.Context, filter string) ([
 			continue
 		}
 		for _, w := range r.ws {
-			if strings.Contains(strings.ToLower(w.Name), f) {
+			if f == "" || strings.Contains(strings.ToLower(w.Name), f) {
 				w.c = r.c
 				found = append(found, w)
 			}
@@ -284,29 +340,63 @@ func parseWorkloadSelectors(data []byte) ([]target, error) {
 	return out, nil
 }
 
-// pickTargets: the matches, one row per workload per cluster, to mark.
-func pickTargets(found []target, filter string) ([]target, error) {
-	if len(found) == 1 {
-		return found, nil
-	}
+// pickTargets: the picker opens at once and loads every workload of every
+// cluster (one row per workload per cluster: names may differ between
+// clusters), filtered by filter, which the user can edit. Marked rows (or the
+// one under the cursor) are returned. With a filter that matches exactly one
+// workload, no picker.
+func (a *app) pickTargets(k string, clusters []kube.Context, filter string, skipped *[]string) ([]target, error) {
 	byKey := map[string]target{}
-	cw, ww := 0, 0
-	for _, t := range found {
-		cw = max(cw, len(t.c.Short))
-		ww = max(ww, len(t.Namespace)+1+len(t.Name))
-	}
-	items := make([]tui.Item, 0, len(found))
-	for _, t := range found {
-		byKey[t.key()] = t
-		badge := ""
-		if t.c.Prod {
-			badge = "PROD"
+	var all []target
+	load := func() ([]tui.Item, error) {
+		var sk []string
+		all, sk = a.findWorkloads(k, clusters, "")
+		*skipped = sk
+		if len(all) == 0 {
+			return nil, errors.New("no deployments, statefulsets or daemonsets found")
 		}
-		items = append(items, tui.Item{Key: t.key(), Badge: badge,
-			Label: fmt.Sprintf("%-*s  %-6s %-*s", cw, t.c.Short, kube.ShortKind(t.Kind), ww, t.Namespace+"/"+t.Name),
-			Hint:  t.c.Name})
+		cw, ww := 0, 0
+		for _, t := range all {
+			cw = max(cw, len(t.c.Short))
+			ww = max(ww, len(t.Namespace)+1+len(t.Name))
+		}
+		items := make([]tui.Item, 0, len(all))
+		for _, t := range all {
+			byKey[t.key()] = t
+			badge := ""
+			if t.c.Prod {
+				badge = "PROD"
+			}
+			items = append(items, tui.Item{Key: t.key(), Badge: badge,
+				Label: fmt.Sprintf("%-*s  %-6s %-*s", cw, t.c.Short, kube.ShortKind(t.Kind), ww, t.Namespace+"/"+t.Name),
+				Hint:  t.c.Name})
+		}
+		return items, nil
 	}
-	its, err := tui.RunMulti(tui.Options{Title: fmt.Sprintf("Run in which workloads? (%q)", filter), Items: items})
+
+	if filter != "" {
+		// one exact-ish match: straight to the command
+		fmt.Fprintln(os.Stderr, tui.Dim.Render(fmt.Sprintf("looking for %q in %d clusters…", filter, len(clusters))))
+		items, err := load()
+		if err != nil {
+			return nil, err
+		}
+		var hits []target
+		for _, t := range all {
+			if strings.Contains(strings.ToLower(t.Name), strings.ToLower(filter)) {
+				hits = append(hits, t)
+			}
+		}
+		if len(hits) == 1 {
+			return hits, nil
+		}
+		return runTargetPicker(tui.Options{Title: "Run in which workloads?", Items: items, Query: filter}, byKey)
+	}
+	return runTargetPicker(tui.Options{Title: fmt.Sprintf("Run in which workloads? (%d clusters)", len(clusters)), Load: load}, byKey)
+}
+
+func runTargetPicker(o tui.Options, byKey map[string]target) ([]target, error) {
+	its, err := tui.RunMulti(o)
 	if err != nil {
 		return nil, err
 	}

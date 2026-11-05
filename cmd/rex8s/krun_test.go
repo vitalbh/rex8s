@@ -17,8 +17,9 @@ func TestParseKrunArgs(t *testing.T) {
 		{[]string{"nginx", "--", "nginx", "-s", "reload"}, "nginx", "", "nginx -s reload", false},
 		{[]string{"nginx", "nginx", "-s", "reload"}, "nginx", "", "nginx -s reload", false},
 		{[]string{"-c", "proxy", "nginx", "--", "nginx", "-t"}, "nginx", "proxy", "nginx -t", false},
-		{[]string{"nginx"}, "", "", "", true},
-		{nil, "", "", "", true},
+		{[]string{"nginx"}, "nginx", "", "", false},
+		{nil, "", "", "", false},
+		{[]string{"-c"}, "", "", "", true},
 	}
 	for _, c := range cases {
 		f, cont, cmd, err := parseKrunArgs(c.args)
