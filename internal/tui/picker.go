@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -32,6 +33,10 @@ type Options struct {
 	PreviewHead func(Item) string
 	PreviewBody func(Item) string
 	Prefetch    bool // fetch the Body of every item up front
+
+	// Multi: space marks items, ctrl+a marks every item the filter shows;
+	// enter returns the marked ones (or the one under the cursor). Use RunMulti.
+	Multi bool
 }
 
 // Run opens the picker full screen. Returns nil if the user cancels.
@@ -41,6 +46,17 @@ func Run(o Options) (*Item, error) {
 		return nil, err
 	}
 	return res.(model).choice, nil
+}
+
+// RunMulti is Run with marking (Options.Multi): returns the marked items, in
+// list order, or the one under the cursor when none is marked. Nil on cancel.
+func RunMulti(o Options) ([]Item, error) {
+	o.Multi = true
+	res, err := tea.NewProgram(newModel(o), tea.WithAltScreen()).Run()
+	if err != nil {
+		return nil, err
+	}
+	return res.(model).chosen, nil
 }
 
 // ── model ──────────────────────────────────────────────────────────────
@@ -71,6 +87,8 @@ type model struct {
 	pending map[string]bool
 	w, h    int
 	choice  *Item
+	marked  map[string]bool
+	chosen  []Item
 }
 
 func newModel(o Options) model {
@@ -87,7 +105,7 @@ func newModel(o Options) model {
 
 	m := model{
 		o: o, items: o.Items, input: ti, spin: sp,
-		cache: map[string]string{}, pending: map[string]bool{},
+		cache: map[string]string{}, pending: map[string]bool{}, marked: map[string]bool{},
 		w: 80, h: 24,
 	}
 	m.loading = len(o.Items) == 0 && o.Load != nil
@@ -135,9 +153,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.matches) > 0 {
 				it := m.items[m.matches[m.cursor].idx]
 				m.choice = &it
+				m.chosen = m.markedItems()
+				if len(m.chosen) == 0 {
+					m.chosen = []Item{it}
+				}
 				return m, tea.Quit
 			}
 			return m, nil
+		case " ":
+			if m.o.Multi {
+				if len(m.matches) > 0 {
+					k := m.items[m.matches[m.cursor].idx].Key
+					m.marked[k] = !m.marked[k]
+					m.move(1)
+				}
+				return m, m.wantPreviews()
+			}
+		case "ctrl+a":
+			if m.o.Multi {
+				all := true
+				for _, mt := range m.matches {
+					all = all && m.marked[m.items[mt.idx].Key]
+				}
+				for _, mt := range m.matches {
+					m.marked[m.items[mt.idx].Key] = !all
+				}
+				return m, nil
+			}
 		case "up", "ctrl+p", "ctrl+k":
 			m.move(-1)
 			return m, m.wantPreviews()
@@ -161,6 +203,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, m.wantPreviews())
 	}
 	return m, nil
+}
+
+func (m model) markedItems() []Item {
+	var out []Item
+	for _, it := range m.items {
+		if m.marked[it.Key] {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 func (m *model) move(d int) {
@@ -267,8 +319,16 @@ func (m model) showPreview() bool { return m.o.PreviewHead != nil && m.w >= 84 }
 
 func (m model) View() string {
 	var b strings.Builder
-	b.WriteString(bold.Render(m.o.Title) + "\n")
-	b.WriteString(dim.Render("↑/↓ move · enter select · esc quit · type to filter") + "\n")
+	title := bold.Render(m.o.Title)
+	help := "↑/↓ move · enter select · esc quit · type to filter"
+	if m.o.Multi {
+		if n := len(m.markedItems()); n > 0 {
+			title += "  " + selRow.Render(fmt.Sprintf("%d marked", n))
+		}
+		help = "space mark · ctrl+a mark all shown · enter run on marked (or this one) · esc quit · type to filter"
+	}
+	b.WriteString(title + "\n")
+	b.WriteString(dim.Render(help) + "\n")
 	b.WriteString(m.input.View() + "\n\n")
 
 	listW := m.w
@@ -349,7 +409,14 @@ func (m model) renderRow(mt match, selected bool, width int) string {
 			label.WriteString(base.Render(s))
 		}
 	}
-	row := cur + tag + label.String()
+	mark := ""
+	if m.o.Multi {
+		mark = dim.Render("[ ] ")
+		if m.marked[it.Key] {
+			mark = selRow.Render("[x] ")
+		}
+	}
+	row := cur + mark + tag + label.String()
 	if it.Hint != "" {
 		row += "  " + dim.Render(it.Hint)
 	}

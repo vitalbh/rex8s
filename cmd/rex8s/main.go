@@ -177,6 +177,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.list(args)
 	case "freconcile":
 		return a.freconcile(args)
+	case "krun":
+		return a.krun(args)
 	case "kstatus":
 		return a.kstatus(args)
 	case "kjobs":
@@ -247,6 +249,8 @@ func usage() {
   rex8s kwarn [-n]          stream Warning events only                    (kwarn)
   rex8s kwhy [FILTER]       pick a pod, ask Claude why it is unhealthy    (kwhy)
   rex8s kfail [-n] [FILTER] failing pods with their last logs             (kfail)
+  rex8s krun NAME -- CMD    run CMD in every pod of the workloads you mark,
+                            on any cluster (e.g. krun nginx -- nginx -s reload)  (krun)
   rex8s kstatus [-w]        cluster health on one screen (-w: refresh)     (kstatus)
   rex8s kjobs [-n] [STATE] [FILTER]  Jobs and CronJobs; STATE: failed|running|done|suspended|cron (kjobs)
   rex8s list KIND [CTX] [NS] JSON for launchers: clusters|namespaces|pods|services
