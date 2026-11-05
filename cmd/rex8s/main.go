@@ -70,7 +70,7 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, tui.Err.Render("rex8s: "+err.Error()))
-		if cmd == "pick" || cmd == "pane" || cmd == "k9s" || cmd == "events" || cmd == "logtail" || cmd == "pftail" || cmd == "exectail" || cmd == "warnings" || cmd == "whytail" || cmd == "monitor" || cmd == "nodetail" {
+		if cmd == "pick" || cmd == "pane" || cmd == "k9s" || cmd == "events" || cmd == "logtail" || cmd == "pftail" || cmd == "exectail" || cmd == "warnings" || cmd == "whytail" || cmd == "monitor" || cmd == "nodetail" || cmd == "asktail" {
 			// runs in a pane that would close immediately: wait so the error can be read
 			fmt.Fprint(os.Stderr, tui.Dim.Render("press enter to close"))
 			bufio.NewReader(os.Stdin).ReadString('\n')
@@ -192,6 +192,13 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.useContext(args[0])
 	case "kexec":
 		return a.kexec(arg(0))
+	case "kask":
+		return a.kask(args)
+	case "asktail":
+		if err := need(3); err != nil {
+			return err
+		}
+		return a.asktail(args[0], args[1], args[2])
 	case "kver":
 		return a.kver(args)
 	case "kroll":
@@ -264,6 +271,8 @@ func usage() {
   rex8s kfail [-n] [FILTER] failing pods with their last logs             (kfail)
   rex8s krun NAME -- CMD    run CMD in every pod of the workloads you mark,
                             on any cluster (e.g. krun nginx -- nginx -s reload)  (krun)
+  rex8s kask [FILTER]       Claude conversation in a split with the cluster's problems,
+                            a pod (FILTER), or piped input (kubectl logs x | kask)  (kask)
   rex8s kver [-d] [FILTER]  image tag of every workload on every cluster   (kver)
   rex8s kroll [FILTER]      restart the workloads you mark, follow the rollouts (kroll)
   rex8s kdiff [FILTER]      compare a workload's spec between two clusters  (kdiff)

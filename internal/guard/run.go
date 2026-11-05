@@ -28,7 +28,10 @@ func Run(tool string, args []string, skipDir string, cfg *config.Config) error {
 	}
 	run := func() error { return syscall.Exec(bin, append([]string{tool}, args...), os.Environ()) }
 
-	if os.Getenv("REX8S_FORCE") != "" || !term.IsTerminal(int(os.Stdin.Fd())) {
+	// REX8S_AGENT: an agent (kask's Claude) runs the command — no terminal,
+	// but production changes must not pass silently.
+	agent := os.Getenv("REX8S_AGENT") != ""
+	if os.Getenv("REX8S_FORCE") != "" || (!agent && !term.IsTerminal(int(os.Stdin.Fd()))) {
 		return run()
 	}
 	p := Parse(args)
@@ -38,6 +41,12 @@ func Run(tool string, args []string, skipDir string, cfg *config.Config) error {
 	c, err := kube.Current(cfg, p.Context, p.Kubeconfig)
 	if err != nil || !c.Prod {
 		return run()
+	}
+	if agent {
+		fmt.Fprintf(os.Stderr, "rex8s guard: refused: %s %s would change the PRODUCTION cluster %s.\n"+
+			"Ask the user first. Only if they agree to this exact change, run it again prefixed with REX8S_FORCE=1.\n",
+			tool, strings.Join(args, " "), c.Short)
+		os.Exit(1)
 	}
 
 	var notes []string

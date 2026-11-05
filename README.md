@@ -38,6 +38,16 @@ with Flux (GitOps) built in.
 
 - **`kwhy`**: pick a pod and ask Claude why it is unhealthy (describe with env
   values redacted, events, current and previous logs; tools disabled).
+- **`kask`**: a Claude Code conversation in a split, already holding the
+  context: `kask` sends a snapshot of the cluster's problems (kstatus, broken
+  pods with their last logs, the last hour's warnings), `kask <filter>` one pod
+  (describe with env values redacted, events, logs), and `kubectl logs x | kask`
+  whatever you pipe in. Claude can run read-only `kubectl`/`flux` commands on
+  its own to dig further; anything else asks for your approval, and on
+  production the guard refuses changes unless re-run with `REX8S_FORCE=1` (a
+  second approval). The context is saved in `~/.cache/rex8s/dumps/`;
+  `kask --dump` only saves it and prints the path. Logs are sent as they are:
+  they may hold sensitive data.
 - **`kstatus`**: the cluster's health on one screen — nodes (pressure, CPU/memory),
   pods, unavailable workloads, Flux, failed jobs, firing alerts (from an
   Alertmanager or Prometheus inside the cluster, when there is one), expiring
@@ -173,6 +183,7 @@ from the context name.
 | `kstatus [-w]` | cluster health on one screen (`-w`: refresh every 30s) |
 | `kjobs [-n] [failed\|running\|done\|suspended\|cron] [filter]` | Jobs and CronJobs; enter: logs, run now, rerun, suspend/resume, delete |
 | `krun [-c container] [name] [-- CMD...]` | pick workloads on any cluster, run CMD in all their pods |
+| `kask [filter]` / `cmd \| kask` | Claude conversation with the cluster's problems, a pod, or piped output (`--dump`: just save the file) |
 | `kver [-d] [filter]` | image tag of every workload on every cluster (`-d`: only where they differ) |
 | `kdiff [filter]` | compare a workload's spec between two clusters |
 | `kroll [filter]` | pick workloads on any cluster, `rollout restart` them and follow the rollouts |
@@ -199,7 +210,7 @@ Everything outside Rex is optional. How to turn each one on or off:
 |---|---|---|---|
 | **Production tint** | every pane | default; color via `prod_background` | `prod_background: off` |
 | **macOS notifications** | `fwatch`, Flux monitor | default | `notifications: false` |
-| **Claude** (`claude` CLI) | `kwhy` | found on PATH (`claude-auto`, then `claude`); or `ai_command: <cli>` | `ai_command: off` |
+| **Claude** (`claude` CLI) | `kwhy`, `kask` | found on PATH (`claude-auto`, then `claude`); or `ai_command: <cli>` | `ai_command: off` |
 | **Login page** | `kauth`, picking a logged-out cluster | `login_url` (or `clusters[].login`) | remove `login_url`; `kauth` still accepts a paste |
 | **Flux CLI** (`flux`) | `fdiff` | install it (`brew install fluxcd/tap/flux`) | don't use `fdiff` |
 | **k9s** | `Cmd+Shift+K` layout | install it | use `Cmd+Shift+J` |

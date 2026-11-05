@@ -24,17 +24,3 @@ func TestPlural(t *testing.T) {
 		t.Error(plural(1, "cronjob"), plural(3, "cronjob"))
 	}
 }
-
-func stripANSI(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == 0x1b {
-			for i < len(s) && s[i] != 'm' {
-				i++
-			}
-			continue
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
-}
