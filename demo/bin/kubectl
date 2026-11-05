@@ -209,9 +209,90 @@ def services(ns):
     all_svcs = [svc("api", "api", [("http", 8080), ("grpc", 9090)]), svc("api", "redis", [("redis", 6379)]),
                 svc("web", "web", [("http", 80)]), svc("search", "search", [("http", 9200)]),
                 svc("payments", "payments-api", [("http", 8080)]),
-                svc("monitoring", "prometheus", [("web", 9090)]), svc("monitoring", "grafana", [("http", 3000)]),
+                svc("monitoring", "prometheus", [("web", 9090)]),
+                svc("monitoring", "alertmanager", [("web", 9093)]), svc("monitoring", "grafana", [("http", 3000)]),
                 svc("ingress-nginx", "ingress-nginx-controller", [("http", 80), ("https", 443)], "LoadBalancer")]
     return [s for s in all_svcs if ns in (None, s["metadata"]["namespace"])]
+
+
+def jobs_and_crons(ns):
+    def cron(n, name, schedule, last_ago, ok_ago, suspend=False):
+        c = {"kind": "CronJob", "metadata": {"name": name, "namespace": n, "creationTimestamp": ts(90 * 86400)},
+             "spec": {"schedule": schedule, "suspend": suspend}, "status": {}}
+        if last_ago is not None:
+            c["status"]["lastScheduleTime"] = ts(last_ago)
+        if ok_ago is not None:
+            c["status"]["lastSuccessfulTime"] = ts(ok_ago)
+        return c
+
+    def job(n, name, owner, start_ago, dur, result, msg=""):
+        j = {"kind": "Job", "metadata": {"name": name, "namespace": n, "creationTimestamp": ts(start_ago)},
+             "spec": {"completions": 1, "parallelism": 1, "backoffLimit": 3},
+             "status": {"startTime": ts(start_ago)}}
+        if owner:
+            j["metadata"]["ownerReferences"] = [{"kind": "CronJob", "name": owner}]
+        if result == "ok":
+            j["status"].update({"succeeded": 1, "completionTime": ts(start_ago - dur),
+                                "conditions": [{"type": "Complete", "status": "True"}]})
+        elif result == "fail":
+            j["status"].update({"failed": 4, "conditions": [{"type": "Failed", "status": "True",
+                                "lastTransitionTime": ts(start_ago - 95),
+                                "reason": "BackoffLimitExceeded", "message": msg or "Job has reached the specified backoff limit"}]})
+        else:
+            j["status"].update({"active": 1})
+        return j
+
+    crons = [cron("api", "nightly-sync", "0 3 * * *", 9 * 3600, 9 * 3600 - 250),
+             cron("payments", "invoice-export", "*/30 * * * *", 600, 2 * 3600 + 200),
+             cron("web", "sitemap", "0 */6 * * *", 3 * 86400, 3 * 86400, suspend=True),
+             cron("search", "reindex", "0 2 * * 0", 4 * 86400, 4 * 86400 - 1800)]
+    jobs = [job("payments", "invoice-export-29872010", "invoice-export", 600, 0, "fail"),
+            job("payments", "invoice-export-29871980", "invoice-export", 2400, 0, "fail"),
+            job("payments", "invoice-export-29871950", "invoice-export", 2 * 3600 + 300, 100, "ok"),
+            job("search", "reindex-manual-7xk2p", "reindex", 200, 0, "run"),
+            job("api", "nightly-sync-29871540", "nightly-sync", 9 * 3600, 250, "ok"),
+            job("api", "db-migrate-v2", None, 5 * 3600, 0, "fail", "Job has reached the specified backoff limit"),
+            job("web", "sitemap-29868120", "sitemap", 3 * 86400, 95, "ok")]
+    keep = lambda o: ns in (None, o["metadata"]["namespace"])
+    return [j for j in jobs if keep(j)], [c for c in crons if keep(c)]
+
+
+ALERTS = [
+    {"labels": {"alertname": "KubePodCrashLooping", "severity": "warning", "namespace": "api"},
+     "annotations": {"summary": "Pod is crash looping."}},
+    {"labels": {"alertname": "KubePodCrashLooping", "severity": "warning", "namespace": "search"},
+     "annotations": {"summary": "Pod is crash looping."}},
+    {"labels": {"alertname": "KubeJobFailed", "severity": "warning", "namespace": "payments"},
+     "annotations": {"summary": "Job failed to complete."}},
+    {"labels": {"alertname": "NodeMemoryHighUtilization", "severity": "critical", "instance": "node-b1"},
+     "annotations": {"summary": "Node is running out of memory."}},
+    {"labels": {"alertname": "Watchdog", "severity": "none"}, "annotations": {"summary": "heartbeat"}},
+]
+
+CERTS = [
+    {"metadata": {"name": "api-tls", "namespace": "api"},
+     "status": {"notAfter": None, "conditions": [{"type": "Ready", "status": "True"}]}},
+    {"metadata": {"name": "web-tls", "namespace": "web"},
+     "status": {"notAfter": None, "conditions": [{"type": "Ready", "status": "True"}]}},
+]
+
+
+NODES = [("node-a1", 0.62, 0.71), ("node-a2", 0.48, 0.83), ("node-b1", 0.35, 0.92)]
+
+
+def nodes():
+    out = []
+    for name, _, mem in NODES:
+        conds = [{"type": "Ready", "status": "True"},
+                 {"type": "MemoryPressure", "status": "True" if mem > 0.9 else "False"},
+                 {"type": "DiskPressure", "status": "False"}]
+        out.append({"metadata": {"name": name, "creationTimestamp": ts(120 * 86400),
+                                 "labels": {"node-role.kubernetes.io/worker": ""}},
+                    "spec": {}, "status": {"conditions": conds,
+                                           "capacity": {"cpu": "16", "memory": "64Gi", "pods": "110"},
+                                           "allocatable": {"cpu": "15800m", "memory": "62Gi", "pods": "110"},
+                                           "nodeInfo": {"kubeletVersion": "v1.30.4"}}})
+    return out
 
 
 def ts(ago):
@@ -253,6 +334,15 @@ def events(flags):
     return evs
 
 
+LOGS_EXTRA = {
+    "invoice": ['{"level":"info","msg":"exporting invoices","since":"2026-11-05T13:30:00Z"}',
+                '{"level":"info","msg":"fetched 1832 invoices"}',
+                '{"level":"error","msg":"upload failed","bucket":"acme-invoices","error":"AccessDenied: s3:PutObject"}',
+                '{"level":"fatal","msg":"export aborted after 3 retries"}'],
+    "migrate": ["applying migration 0042_orders_v2.sql",
+                "ERROR: column \"customer_id\" of relation \"orders\" contains null values",
+                "migration failed, rolling back"],
+}
 LOGS = {
     "worker": [
         '{"level":"info","msg":"starting worker","queue":"orders","concurrency":8}',
@@ -277,8 +367,10 @@ LOGS = {
 
 def logs(pos, flags):
     name = pos[1] if len(pos) > 1 else ""
-    key = "worker" if name.startswith("worker") else "search" if name.startswith("search") else "default"
-    lines = LOGS[key]
+    name = name.split("/", 1)[-1]
+    key = ("worker" if name.startswith("worker") else "search" if name.startswith("search")
+           else "invoice" if name.startswith("invoice") else "migrate" if name.startswith("db-migrate") else "default")
+    lines = LOGS_EXTRA.get(key) or LOGS[key]
     prefix = "[pod/%s/app] " % name if "--prefix" in flags else ""
     if name.startswith("payments-api"):
         die("Error from server (BadRequest): container \"app\" in pod \"%s\" is waiting to start: trying and failing to pull image" % name)
@@ -385,6 +477,16 @@ def main():
         print("user/demo@example.com")
     elif verb == "get" and len(pos) > 1:
         res = pos[1]
+        if res.startswith("/api/v1/namespaces/monitoring/services/alertmanager"):
+            json.dump(ALERTS, sys.stdout)
+            return
+        if res.startswith("/api"):
+            die("Error from server (NotFound): the server could not find the requested resource")
+        if res.startswith("certificates"):
+            CERTS[0]["status"]["notAfter"] = ts(-6 * 86400)
+            CERTS[1]["status"]["notAfter"] = ts(-70 * 86400)
+            json.dump({"items": CERTS}, sys.stdout)
+            return
         if res in ("ns", "namespaces", "namespace"):
             print("\n".join(NAMESPACES))
         elif "gitrepositories" in res and "kustomizations" not in res:
@@ -410,6 +512,12 @@ def main():
             json.dump({"items": pods(ns)}, sys.stdout)
         elif res in ("services", "svc", "service"):
             json.dump({"items": services(ns)}, sys.stdout)
+        elif res in ("jobs", "job", "jobs.batch"):
+            json.dump({"items": jobs_and_crons(ns)[0]}, sys.stdout)
+        elif res in ("cronjobs", "cronjob", "cj", "cronjobs.batch"):
+            json.dump({"items": jobs_and_crons(ns)[1]}, sys.stdout)
+        elif res in ("nodes", "node", "no"):
+            json.dump({"items": nodes()}, sys.stdout)
         elif res in ("events", "ev"):
             evs = events(flags)
             if "-w" in flags or "--watch" in flags:
@@ -436,6 +544,13 @@ def main():
         name = pos[2] if len(pos) > 2 else "pod"
         app = name.split("-")[0]
         print(DESCRIBE.format(name=name, ns=ns or "api", app=app, rs="-".join(name.split("-")[:2])))
+    elif verb == "top" and len(pos) > 1 and pos[1] in ("nodes", "node", "no"):
+        for name, cpu, mem in NODES:
+            print("%s   %dm   %d%%   %dMi   %d%%" % (name, int(cpu * 15800), int(cpu * 100), int(mem * 63488), int(mem * 100)))
+    elif verb == "create" and len(pos) > 2 and pos[1] == "job":
+        print("job.batch/%s created" % pos[2])
+    elif verb == "delete" and len(pos) > 2:
+        print('%s.batch "%s" deleted' % (pos[1], pos[2]))
     elif verb == "logs":
         logs(pos, flags)
     elif verb == "annotate":

@@ -38,6 +38,12 @@ with Flux (GitOps) built in.
 
 - **`kwhy`**: pick a pod and ask Claude why it is unhealthy (describe with env
   values redacted, events, current and previous logs; tools disabled).
+- **`kstatus`**: the cluster's health on one screen — nodes (pressure, CPU/memory),
+  pods, unavailable workloads, Flux, failed jobs, firing alerts (from an
+  Alertmanager or Prometheus inside the cluster, when there is one), expiring
+  certificates (cert-manager) and the last hour's warnings. `-w` refreshes.
+- **`kjobs`**: Jobs and CronJobs, failed first, with logs and recent runs in the
+  preview; run a CronJob now, rerun, suspend/resume, delete.
 - **`kfail`**: only the unhealthy pods of the cluster, with their recent events and
   last log lines in the preview — the crashed container's logs when it restarted.
   Logs are fetched only for the pod under the cursor.
@@ -57,8 +63,10 @@ with Flux (GitOps) built in.
 | ![fwatch](docs/fwatch.gif) | ![kwhy](docs/kwhy.gif) |
 | **`kflux`**: Flux resources, failing first | **`kwarn`**: only Warning events, live |
 | ![kflux](docs/kflux.gif) | ![kwarn](docs/kwarn.gif) |
-| **`kfail`**: failing pods with the crashed container's last logs | |
-| ![kfail](docs/kfail.gif) | |
+| **`kfail`**: failing pods with the crashed container's last logs | **`kjobs`**: Jobs and CronJobs with logs and recent runs |
+| ![kfail](docs/kfail.gif) | ![kjobs](docs/kjobs.gif) |
+| **`kstatus`**: the cluster's health on one screen | |
+| ![kstatus](docs/kstatus.gif) | |
 
 All recordings use the built-in demo mode (fake `example.com` clusters) — see [Demo mode](#demo-mode).
 
@@ -134,6 +142,8 @@ from the context name.
 | `fwatch [-A] [--now]` | inside a git repo: follow HEAD until Flux applied it and it rolled out |
 | `kflux` | Flux resources on this pane's cluster |
 | `kwhy [filter]` | ask Claude why a pod is unhealthy |
+| `kstatus [-w]` | cluster health on one screen (`-w`: refresh every 30s) |
+| `kjobs [-n] [failed\|running\|done\|suspended\|cron] [filter]` | Jobs and CronJobs; enter: logs, run now, rerun, suspend/resume, delete |
 | `kfail [-n] [filter]` | failing pods (all namespaces; `-n` this namespace) with events and last logs; enter: logs, why, shell, describe |
 | `kwarn [-n]` | stream Warning events (all namespaces; `-n` this namespace) |
 | `klogs [filter]` | follow a pod's logs in a split |
@@ -161,6 +171,7 @@ Everything outside Rex is optional. How to turn each one on or off:
 | **k9s** | `Cmd+Shift+K` layout | install it | use `Cmd+Shift+J` |
 | **Raycast extension** | Open Cluster, Search Pods/Services/Flux, Flux Status menu bar | `cd raycast && npm install && npm run dev` | Raycast → Extensions → Rex Kubernetes → Uninstall (or disable single commands there) |
 | **Raycast menu bar** | Flux Status, Kube Context | enable the "Flux Status" / "Kube Context" commands in Raycast | disable those commands in Raycast settings |
+| **Cluster alerts** | `kstatus` | automatic when an Alertmanager (port 9093) or Prometheus (9090) service runs in the cluster; read through the API server proxy | nothing to turn off: no such service, no Alerts line |
 | **Production guard** | `kubectl`/`helm`/`flux` in panes | default | `REX8S_FORCE=1` per command |
 
 `kwhy` sends the pod's describe output (env values redacted), events and logs to
