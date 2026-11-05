@@ -177,6 +177,11 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.list(args)
 	case "freconcile":
 		return a.freconcile(args)
+	case "use-context":
+		if err := need(1); err != nil {
+			return err
+		}
+		return a.useContext(args[0])
 	case "kexec":
 		return a.kexec(arg(0))
 	case "exectail":
@@ -236,6 +241,7 @@ func usage() {
   rex8s kwarn [-n]          stream Warning events only                    (kwarn)
   rex8s kwhy [FILTER]       pick a pod, ask Claude why it is unhealthy    (kwhy)
   rex8s list KIND [CTX] [NS] JSON for launchers: clusters|namespaces|pods|services
+  rex8s use-context CTX     set the machine's default context (~/.kube/config)
 
 config: `+config.Path()+"\n")
 }

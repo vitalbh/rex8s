@@ -31,6 +31,7 @@ export type Cluster = {
   server: string;
   namespace: string;
   user: string;
+  current: boolean;
 };
 
 export type Pod = {
@@ -82,6 +83,11 @@ function run(bin: string, args: string[]): Promise<string> {
 
 export async function list<T>(...args: string[]): Promise<T> {
   return JSON.parse(await run(prefs().rexK8s, ["list", ...args])) as T;
+}
+
+/** Sets the machine's default context (current-context of the master kubeconfig). */
+export async function useContext(ctx: string): Promise<void> {
+  await run(prefs().rexK8s, ["use-context", ctx]);
 }
 
 /** Runs a rex8s action in Rex (rex do NAME --args JSON) and brings Rex to the front. */

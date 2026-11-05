@@ -45,6 +45,14 @@
       "subtitle": "rex8s",
       "description": "Search Flux Kustomizations, HelmReleases and GitRepositories; reconcile them.",
       "mode": "view"
+    },
+    {
+      "name": "kube-context",
+      "title": "Kube Context",
+      "subtitle": "rex8s",
+      "description": "Show and switch the machine's default Kubernetes context in the menu bar.",
+      "mode": "menu-bar",
+      "interval": "1m"
     }
   ],
   "preferences": [

@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+"""Fake kubectl for rex8s demo mode: answers the calls rex8s makes with
+made-up data for example.com clusters. Nothing here talks to a real cluster.
+
+The fwatch story is time based: the first GitRepository query starts a clock
+(reset after 90s of inactivity); the source fetches HEAD after ~4s, the
+Kustomizations apply it and a Deployment rolls out over the next ~12s.
+"""
+import json, os, re, subprocess, sys, tempfile, time
+
+STATE = os.path.join(tempfile.gettempdir(), "rex8s-demo")
+os.makedirs(STATE, exist_ok=True)
+OLD_SHA = "9c41e07b2d6a5f3e8b1c0d4a7e6f5b3c2a1d0e9f"
+
+CLUSTERS = {
+    "acme-prod-use": {"short": "use", "offset": 0},
+    "acme-prod-euw": {"short": "euw", "offset": 3},
+    "acme-staging": {"short": "staging", "offset": 1},
+    "acme-prod-sa": {"short": "sa", "expired": True},
+}
+NAMESPACES = ["api", "web", "payments", "search", "monitoring", "ingress-nginx", "flux-system", "kube-system"]
+
+
+def die(msg, code=1):
+    sys.stderr.write(msg + "\n")
+    sys.exit(code)
+
+
+# ── arguments ────────────────────────────────────────────────────────────
+VALUE_FLAGS = {"--kubeconfig", "--context", "-n", "--namespace", "-o", "--output", "--field-selector",
+               "-l", "--selector", "-c", "--container", "--tail", "--type", "-p", "--patch"}
+
+
+def parse(argv):
+    flags, pos, rest = {}, [], []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            rest = argv[i + 1:]
+            break
+        if a.startswith("--") and "=" in a:
+            k, v = a.split("=", 1)
+            flags[k] = v
+        elif a in VALUE_FLAGS and i + 1 < len(argv):
+            flags[a] = argv[i + 1]
+            i += 1
+        elif a.startswith("-"):
+            flags[a] = True
+        else:
+            pos.append(a)
+        i += 1
+    return flags, pos, rest
+
+
+def current_context(flags):
+    if "--context" in flags:
+        return flags["--context"]
+    for f in (os.environ.get("KUBECONFIG") or "").split(":"):
+        try:
+            for line in open(f):
+                if line.startswith("current-context:"):
+                    return line.split(":", 1)[1].strip().strip('"')
+        except OSError:
+            pass
+    return "acme-prod-use"
+
+
+# ── fwatch clock ─────────────────────────────────────────────────────────
+def head_sha():
+    try:
+        return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=3).stdout.strip() or OLD_SHA
+    except Exception:
+        return OLD_SHA
+
+
+def clock(start=False):
+    path = os.path.join(STATE, "fwatch-t0")
+    now = time.time()
+    try:
+        last = os.path.getmtime(path)
+        t0 = float(open(path).read())
+    except (OSError, ValueError):
+        last, t0 = 0, None
+    if start and (t0 is None or now - last > 90):
+        t0 = now
+    if t0 is None:
+        return 999.0  # no fwatch running: everything settled
+    open(path, "w").write(str(t0))  # touch: keep the story alive while polled
+    return now - t0
+
+
+def rev(sha):
+    return "main@sha1:" + sha
+
+
+# ── flux ─────────────────────────────────────────────────────────────────
+def cond(status, reason="", msg=""):
+    return [{"type": "Ready", "status": status, "reason": reason, "message": msg}]
+
+
+def flux_objects(ctx, start_clock=False):
+    c = CLUSTERS[ctx]
+    e = clock(start_clock) - c.get("offset", 0)
+    new = head_sha()
+    src_rev = rev(new if e >= 4 else OLD_SHA)
+    objs = [{
+        "kind": "GitRepository", "metadata": {"name": "flux-system", "namespace": "flux-system", "generation": 1},
+        "spec": {"url": "https://github.com/acme/fleet.git", "ref": {"branch": "main"}},
+        "status": {"observedGeneration": 1, "artifact": {"revision": src_rev},
+                   "conditions": cond("True", "Succeeded", "stored artifact for revision '%s'" % src_rev)},
+    }]
+    short = c["short"]
+    for name, path, applied_at in (("flux-system", "./clusters/" + short, 6), ("infra", "./infrastructure", 7), ("apps", "./apps/" + short, 8)):
+        applied = rev(new) if e >= applied_at else rev(OLD_SHA)
+        status = cond("True", "ReconciliationSucceeded", "Applied revision: " + applied)
+        if 4 <= e < applied_at:
+            status = cond("Unknown", "Progressing", "Reconciliation in progress")
+        spec = {"path": path, "sourceRef": {"kind": "GitRepository", "name": "flux-system"}, "interval": "5m"}
+        if ctx == "acme-staging" and name == "apps":
+            spec["suspend"] = True
+        objs.append({"kind": "Kustomization", "metadata": {"name": name, "namespace": "flux-system", "generation": 1},
+                     "spec": spec, "status": {"observedGeneration": 1, "lastAppliedRevision": applied,
+                                              "lastAttemptedRevision": applied, "conditions": status,
+                                              "lastHandledReconcileAt": handled("Kustomization", name)}})
+    hr_ready = cond("True", "UpgradeSucceeded", "Helm upgrade succeeded for release monitoring/kube-prometheus-stack.v14")
+    if ctx == "acme-prod-euw":
+        hr_ready = cond("False", "UpgradeFailed",
+                        "Helm upgrade failed for release payments/payments-api with chart payments-api@2.4.1: "
+                        "context deadline exceeded; upgrade retries exhausted")
+    objs.append({"kind": "HelmRelease",
+                 "metadata": {"name": "payments-api" if ctx == "acme-prod-euw" else "kube-prometheus-stack",
+                              "namespace": "payments" if ctx == "acme-prod-euw" else "monitoring", "generation": 3,
+                              "labels": {"kustomize.toolkit.fluxcd.io/name": "apps",
+                                         "kustomize.toolkit.fluxcd.io/namespace": "flux-system"}},
+                 "spec": {}, "status": {"observedGeneration": 3, "conditions": hr_ready,
+                                        "lastAppliedRevision": "2.4.1"}})
+    return objs
+
+
+def handled(kind, name):
+    try:
+        token, at = open(os.path.join(STATE, "reconcile-" + name)).read().split("|")
+        return token if time.time() - float(at) > 3 else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def workloads(ctx):
+    c = CLUSTERS[ctx]
+    e = clock(start=True) - c.get("offset", 0)  # fwatch reads these first (baseline)
+    labels = {"kustomize.toolkit.fluxcd.io/name": "apps", "kustomize.toolkit.fluxcd.io/namespace": "flux-system"}
+
+    def dep(ns, name, replicas, gen, updated, available, extra=None):
+        d = {"kind": "Deployment", "metadata": {"name": name, "namespace": ns, "generation": gen, "labels": labels},
+             "spec": {"replicas": replicas},
+             "status": {"observedGeneration": gen, "updatedReplicas": updated, "availableReplicas": available,
+                        "readyReplicas": available, "conditions": []}}
+        if extra:
+            d["status"].update(extra)
+        return d
+
+    if e < 8:
+        api = dep("api", "api", 3, 11, 3, 3)
+    elif e < 16:
+        step = int((e - 8) / 2.5) + 1
+        api = dep("api", "api", 3, 12, min(3, step), min(3, step) - (0 if step >= 3 else 1))
+    else:
+        api = dep("api", "api", 3, 12, 3, 3)
+    return [api, dep("web", "web", 4, 30, 4, 4), dep("search", "search", 2, 7, 2, 2),
+            dep("api", "worker", 2, 5, 2, 1)]
+
+
+# ── pods, services, events, logs ─────────────────────────────────────────
+def pod(ns, name, phase="Running", ready=(1, 1), restarts=0, waiting=None, age_h=26, containers=("app",)):
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age_h * 3600))
+    statuses = []
+    for i, cn in enumerate(containers):
+        st = {"name": cn, "ready": i < ready[0], "restartCount": restarts if i == 0 else 0, "state": {}}
+        if waiting and i == 0:
+            st["state"] = {"waiting": {"reason": waiting}}
+        statuses.append(st)
+    return {"metadata": {"name": name, "namespace": ns, "creationTimestamp": created},
+            "spec": {"containers": [{"name": c} for c in containers]},
+            "status": {"phase": phase, "containerStatuses": statuses}}
+
+
+def pods(ns):
+    all_pods = [
+        pod("api", "api-7d9f6c5b8-4kq2x", age_h=2), pod("api", "api-7d9f6c5b8-9ws7d", age_h=2),
+        pod("api", "api-7d9f6c5b8-zt5mr", age_h=2),
+        pod("api", "worker-5c8b7d4f9-hx2lp", ready=(0, 1), restarts=42, waiting="CrashLoopBackOff", age_h=5),
+        pod("api", "worker-5c8b7d4f9-q8vnt", age_h=5),
+        pod("api", "nightly-sync-29871540-mbk4c", phase="Succeeded", ready=(0, 1), age_h=9),
+        pod("api", "redis-0", containers=("redis", "metrics"), ready=(2, 2), age_h=300),
+        pod("search", "search-6b4f8d7c9-r2lgn", ready=(0, 1), restarts=7, waiting="CrashLoopBackOff", age_h=30),
+        pod("search", "search-6b4f8d7c9-tq9wd", age_h=30),
+        pod("web", "web-58c9f7b6d4-2jx8p", age_h=50), pod("web", "web-58c9f7b6d4-7mfkz", age_h=50),
+        pod("payments", "payments-api-6f7c8d9b5-kz4lp", ready=(0, 1), waiting="ImagePullBackOff", age_h=1),
+        pod("monitoring", "prometheus-0", containers=("prometheus", "config-reloader"), ready=(2, 2), age_h=700),
+    ]
+    return [p for p in all_pods if ns in (None, p["metadata"]["namespace"])]
+
+
+def services(ns):
+    def svc(n, name, ports, t="ClusterIP"):
+        return {"metadata": {"name": name, "namespace": n}, "spec": {"type": t, "ports": [
+            {"name": pn, "port": pp, "protocol": "TCP"} for pn, pp in ports]}}
+    all_svcs = [svc("api", "api", [("http", 8080), ("grpc", 9090)]), svc("api", "redis", [("redis", 6379)]),
+                svc("web", "web", [("http", 80)]), svc("search", "search", [("http", 9200)]),
+                svc("payments", "payments-api", [("http", 8080)]),
+                svc("monitoring", "prometheus", [("web", 9090)]), svc("monitoring", "grafana", [("http", 3000)]),
+                svc("ingress-nginx", "ingress-nginx-controller", [("http", 80), ("https", 443)], "LoadBalancer")]
+    return [s for s in all_svcs if ns in (None, s["metadata"]["namespace"])]
+
+
+def ts(ago):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - ago))
+
+
+WARNINGS = [
+    ("api", "Pod", "worker-5c8b7d4f9-hx2lp", "BackOff", "Back-off restarting failed container app in pod worker-5c8b7d4f9-hx2lp", 380),
+    ("search", "Pod", "search-6b4f8d7c9-r2lgn", "OOMKilling", "Memory cgroup out of memory: Killed process 4121 (java) total-vm:6.1GB, anon-rss:2.0GB", 7),
+    ("payments", "Pod", "payments-api-6f7c8d9b5-kz4lp", "Failed", "Failed to pull image \"ghcr.io/acme/payments-api:2.4.1\": not found", 12),
+    ("api", "Pod", "worker-5c8b7d4f9-hx2lp", "Unhealthy", "Readiness probe failed: HTTP probe failed with statuscode: 503", 96),
+    ("web", "Ingress", "web", "Sync", "Error: endpoints \"web-canary\" not found", 3),
+    ("payments", "HelmRelease", "payments-api", "UpgradeFailed", "Helm upgrade failed: context deadline exceeded", 4),
+]
+
+
+def event(i, ns, kind, name, reason, msg, count, ago=30):
+    return {"metadata": {"uid": "demo-%d" % i, "namespace": ns}, "type": "Warning" if reason not in ("ReconciliationSucceeded", "Pulled", "Started") else "Normal",
+            "involvedObject": {"kind": kind, "name": name}, "reason": reason, "message": msg,
+            "count": count, "lastTimestamp": ts(ago)}
+
+
+def events(flags):
+    sel = flags.get("--field-selector", "")
+    ns = None if "-A" in flags else flags.get("-n")
+    want_name = None
+    for part in sel.split(","):
+        if part.startswith("involvedObject.name="):
+            want_name = part.split("=", 1)[1]
+    evs = [event(i, *w, ago=40 + i * 25) for i, w in enumerate(WARNINGS)]
+    evs.append(event(90, "flux-system", "Kustomization", "apps", "ReconciliationSucceeded",
+                     "Reconciliation finished in 4.2s, next run in 5m0s", 1, 50))
+    if want_name:
+        evs = [e for e in evs if e["involvedObject"]["name"] == want_name]
+    if "type=Warning" in sel:
+        evs = [e for e in evs if e["type"] == "Warning"]
+    if ns:
+        evs = [e for e in evs if e["metadata"]["namespace"] == ns]
+    return evs
+
+
+LOGS = {
+    "worker": [
+        '{"level":"info","msg":"starting worker","queue":"orders","concurrency":8}',
+        '{"level":"info","msg":"connected to redis","addr":"redis.api:6379"}',
+        '{"level":"error","msg":"migration check failed","error":"pq: relation \\"orders_v2\\" does not exist"}',
+        '{"level":"fatal","msg":"cannot start without schema v2, exiting"}',
+    ],
+    "search": [
+        "[INFO ] starting search node, heap=1536m",
+        "[INFO ] loading index 'catalog' (48213 docs)",
+        "[WARN ] GC overhead 92% in the last 30s",
+        "java.lang.OutOfMemoryError: Java heap space",
+    ],
+    "default": [
+        '10.42.1.17 - - "GET /healthz HTTP/1.1" 200 2 "-" "kube-probe/1.30"',
+        '10.42.3.8 - - "GET /v1/orders?limit=20 HTTP/1.1" 200 5123 "-" "web/3.2"',
+        '10.42.3.8 - - "POST /v1/orders HTTP/1.1" 201 312 "-" "web/3.2"',
+        '10.42.2.4 - - "GET /v1/products/814 HTTP/1.1" 200 1840 "-" "web/3.2"',
+    ],
+}
+
+
+def logs(pos, flags):
+    name = pos[1] if len(pos) > 1 else ""
+    key = "worker" if name.startswith("worker") else "search" if name.startswith("search") else "default"
+    lines = LOGS[key]
+    prefix = "[pod/%s/app] " % name if "--prefix" in flags else ""
+    if "--previous" in flags and key == "default":
+        die("Error from server (BadRequest): previous terminated container \"app\" in pod \"%s\" not found" % name)
+    for l in lines:
+        print(prefix + l)
+    if "-f" in flags or "--follow" in flags:
+        sys.stdout.flush()
+        i = 0
+        while True:
+            time.sleep(1.4)
+            print(prefix + LOGS["default"][i % 4])
+            sys.stdout.flush()
+            i += 1
+
+
+FLUX_DESCRIBE = """Name:         {name}
+Namespace:    {ns}
+API Version:  {api}/v1
+Kind:         {kind}
+Spec:
+  Interval:  5m0s
+  Prune:     true
+  Source Ref:
+    Kind:  GitRepository
+    Name:  flux-system
+Status:
+  Conditions:
+    Last Transition Time:  2026-11-05T13:58:41Z
+    Message:               Applied revision: main@sha1:4f2a91c
+    Reason:                ReconciliationSucceeded
+    Status:                True
+    Type:                  Ready
+  Last Applied Revision:   main@sha1:4f2a91c
+Events:
+  Type    Reason                   Age   From                  Message
+  ----    ------                   ----  ----                  -------
+  Normal  ReconciliationSucceeded  2m    kustomize-controller  Reconciliation finished in 4.2s, next run in 5m0s
+"""
+
+DESCRIBE = """Name:             {name}
+Namespace:        {ns}
+Priority:         0
+Node:             ip-10-0-3-21.example.internal/10.0.3.21
+Labels:           app={app}
+Status:           Running
+Controlled By:    ReplicaSet/{rs}
+Containers:
+  app:
+    Image:          ghcr.io/acme/{app}:1.18.2
+    State:          Waiting
+      Reason:       CrashLoopBackOff
+    Last State:     Terminated
+      Reason:       Error
+      Exit Code:    1
+    Ready:          False
+    Restart Count:  42
+    Limits:
+      memory:  512Mi
+    Requests:
+      cpu:     100m
+      memory:  256Mi
+    Environment:
+      QUEUE:         orders
+      DATABASE_URL:  postgres://worker:s3cr3t@db.api:5432/orders
+      API_TOKEN:     <set to the key 'token' in secret 'worker'>  Optional: false
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access (ro)
+Conditions:
+  Type              Status
+  Ready             False
+  ContainersReady   False
+Events:
+  Type     Reason   Age                    From     Message
+  ----     ------   ----                   ----     -------
+  Warning  BackOff  2m (x380 over 5h)      kubelet  Back-off restarting failed container app
+"""
+
+
+# ── main ─────────────────────────────────────────────────────────────────
+def main():
+    flags, pos, rest = parse(sys.argv[1:])
+    ctx = current_context(flags)
+    if pos[:2] == ["config", "use-context"] and len(pos) > 2:
+        path = flags.get("--kubeconfig") or os.environ.get("KUBECONFIG", "").split(":")[-1]
+        text = open(path).read()
+        text = re.sub(r"(?m)^current-context: .*$", "current-context: " + pos[2], text, count=1)
+        open(path, "w").write(text)
+        print('Switched to context "%s".' % pos[2])
+        return
+    if pos[:1] == ["config"]:
+        print("Property set.")
+        return
+    if ctx not in CLUSTERS:
+        die("error: context \"%s\" does not exist (demo mode only knows acme-* contexts)" % ctx)
+    if CLUSTERS[ctx].get("expired"):
+        die("error: You must be logged in to the server (Unauthorized)")
+    verb = pos[0] if pos else ""
+    ns = None if "-A" in flags else flags.get("-n", flags.get("--namespace"))
+    out = flags.get("-o", flags.get("--output", ""))
+
+    if verb == "auth":
+        print("user/demo@example.com")
+    elif verb == "get" and len(pos) > 1:
+        res = pos[1]
+        if res in ("ns", "namespaces", "namespace"):
+            print("\n".join(NAMESPACES))
+        elif "gitrepositories" in res and "kustomizations" not in res:
+            objs = [o for o in flux_objects(ctx, start_clock=True) if o["kind"] == "GitRepository"]
+            json.dump({"items": objs}, sys.stdout)
+        elif "kustomizations" in res or "helmreleases" in res:
+            objs = flux_objects(ctx)
+            kinds = set()
+            for part in res.split(","):
+                kinds.add({"kustomizations": "Kustomization", "helmreleases": "HelmRelease",
+                           "gitrepositories": "GitRepository"}.get(part.split(".")[0], part))
+            objs = [o for o in objs if o["kind"] in kinds]
+            if len(pos) > 2:  # a single object (reconcile polling)
+                one = [o for o in objs if o["metadata"]["name"] == pos[2]]
+                if not one:
+                    die('Error from server (NotFound): "%s" not found' % pos[2])
+                json.dump(one[0], sys.stdout)
+            else:
+                json.dump({"items": objs}, sys.stdout)
+        elif res.startswith("deployments"):
+            json.dump({"items": workloads(ctx)}, sys.stdout)
+        elif res in ("pods", "pod", "po"):
+            json.dump({"items": pods(ns)}, sys.stdout)
+        elif res in ("services", "svc", "service"):
+            json.dump({"items": services(ns)}, sys.stdout)
+        elif res in ("events", "ev"):
+            evs = events(flags)
+            if "-w" in flags or "--watch" in flags:
+                for e in evs:
+                    print(json.dumps(e, indent=4))
+                sys.stdout.flush()
+                i = 0
+                while True:  # a warning now and then, like a live cluster
+                    time.sleep(4)
+                    w = WARNINGS[i % len(WARNINGS)]
+                    print(json.dumps(event(100 + i, w[0], w[1], w[2], w[3], w[4], w[5] + i + 1, 0), indent=4))
+                    sys.stdout.flush()
+                    i += 1
+            else:
+                json.dump({"items": evs}, sys.stdout)
+        else:
+            json.dump({"items": []}, sys.stdout)
+    elif verb == "describe" and "fluxcd.io" in (pos[1] if len(pos) > 1 else ""):
+        kind = pos[1].split(".")[0]
+        name = pos[2] if len(pos) > 2 else ""
+        print(FLUX_DESCRIBE.format(name=name, ns=ns or "flux-system", kind={"kustomizations": "Kustomization", "helmreleases": "HelmRelease", "gitrepositories": "GitRepository"}.get(kind, kind),
+                                   api=pos[1].split(".", 1)[1] if "." in pos[1] else "fluxcd.io"))
+    elif verb == "describe":
+        name = pos[2] if len(pos) > 2 else "pod"
+        app = name.split("-")[0]
+        print(DESCRIBE.format(name=name, ns=ns or "api", app=app, rs="-".join(name.split("-")[:2])))
+    elif verb == "logs":
+        logs(pos, flags)
+    elif verb == "annotate":
+        for a in pos:
+            if a.startswith("reconcile.fluxcd.io/requestedAt="):
+                name = pos[2] if len(pos) > 2 else ""
+                open(os.path.join(STATE, "reconcile-" + name), "w").write(a.split("=", 1)[1] + "|" + str(time.time()))
+        print("%s annotated" % (pos[1] if len(pos) > 1 else "resource"))
+    elif verb == "patch":
+        print("%s/%s patched" % (pos[1] if len(pos) > 1 else "resource", pos[2] if len(pos) > 2 else ""))
+    elif verb == "exec":
+        name = pos[1] if len(pos) > 1 else "pod"
+        os.execvpe("/bin/sh", ["/bin/sh", "-i"], dict(os.environ, PS1="app@%s:/app$ " % name, ENV=""))
+    elif verb == "port-forward":
+        mapping = pos[2] if len(pos) > 2 else "8080:8080"
+        local, _, remote = mapping.partition(":")
+        print("Forwarding from 127.0.0.1:%s -> %s\nForwarding from [::1]:%s -> %s" % (local, remote, local, remote))
+        sys.stdout.flush()
+        while True:
+            time.sleep(3600)
+    else:
+        die("demo kubectl: '%s' isn't simulated" % " ".join(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass

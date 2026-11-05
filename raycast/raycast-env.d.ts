@@ -28,6 +28,8 @@ declare namespace Preferences {
   export type FluxStatus = ExtensionPreferences & {}
   /** Preferences accessible in the `search-flux` command */
   export type SearchFlux = ExtensionPreferences & {}
+  /** Preferences accessible in the `kube-context` command */
+  export type KubeContext = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -41,5 +43,7 @@ declare namespace Arguments {
   export type FluxStatus = {}
   /** Arguments passed to the `search-flux` command */
   export type SearchFlux = {}
+  /** Arguments passed to the `kube-context` command */
+  export type KubeContext = {}
 }
 

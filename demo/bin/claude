@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Fake claude CLI for demo mode: reads the prompt, streams a canned answer."""
+import sys, time
+data = sys.stdin.read()
+if "search-" in data:
+    answer = """**Diagnosis** — the JVM runs out of heap: the container limit allows it, but `-Xmx` (1536m) is too small for the `catalog` index, so the pod is OOM-killed and restarts.
+
+**Evidence**
+- `java.lang.OutOfMemoryError: Java heap space`
+- event `OOMKilling` ×7, `GC overhead 92%`
+
+**Fix**
+1. In `apps/use/search/values.yaml` raise the heap: `JAVA_OPTS=-XX:MaxRAMPercentage=75` and `limits.memory: 3Gi`.
+2. Merge, then `fwatch` to follow the rollout.
+"""
+else:
+    answer = """**Diagnosis** — the worker exits on startup because the database schema it needs (`orders_v2`) doesn't exist yet: the new image (1.18.2) was deployed before the migration ran.
+
+**Evidence**
+- log: `pq: relation "orders_v2" does not exist` → `cannot start without schema v2, exiting`
+- `CrashLoopBackOff`, 42 restarts; the second replica (older pod) is healthy
+
+**Fix**
+1. Run the `orders` migration job first (`apps/use/api/migrations-job.yaml`), or add it as a Flux `dependsOn` before `apps`.
+2. Until then, pin the worker back to the previous image in `apps/use/api/worker.yaml`.
+"""
+for word in answer.split(" "):
+    sys.stdout.write(word + " ")
+    sys.stdout.flush()
+    time.sleep(0.025)
+print()

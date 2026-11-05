@@ -133,6 +133,7 @@ from the context name.
 | `klogs [filter]` | follow a pod's logs in a split |
 | `kexec [filter]` | shell into a pod in a split |
 | `kpf [filter]` | port-forward a service in a split, on a free local port |
+| `rex8s use-context CTX` | set the machine's default context (what `kubectl` uses outside rex8s panes) |
 | `REX8S_FORCE=1 kubectl ...` | skip the production confirmation (scripts) |
 
 Command palette (`Cmd+Shift+P`): **Kubernetes: Flux Monitor**, **Kubernetes: Restore Cluster Tabs**.
@@ -153,7 +154,7 @@ Everything outside Rex is optional. How to turn each one on or off:
 | **Flux CLI** (`flux`) | `fdiff` | install it (`brew install fluxcd/tap/flux`) | don't use `fdiff` |
 | **k9s** | `Cmd+Shift+K` layout | install it | use `Cmd+Shift+J` |
 | **Raycast extension** | Open Cluster, Search Pods/Services/Flux, Flux Status menu bar | `cd raycast && npm install && npm run dev` | Raycast → Extensions → Rex Kubernetes → Uninstall (or disable single commands there) |
-| **Raycast menu bar** | Flux Status | enable the "Flux Status" command in Raycast | disable that command in Raycast settings |
+| **Raycast menu bar** | Flux Status, Kube Context | enable the "Flux Status" / "Kube Context" commands in Raycast | disable those commands in Raycast settings |
 | **Production guard** | `kubectl`/`helm`/`flux` in panes | default | `REX8S_FORCE=1` per command |
 
 `kwhy` sends the pod's describe output (env values redacted), events and logs to
@@ -169,6 +170,7 @@ turn it off with `ai_command: off` where that isn't acceptable.
 - **Search Services** — every service; port-forward on a free local port in a Rex tab.
 - **Search Flux** — every Flux resource with its message; reconcile and wait for the result.
 - **Flux Status** — menu bar icon: green when healthy, red with the number of failing resources.
+- **Kube Context** — menu bar: the machine's default context (`~/.kube/config`), red when it is production; click a cluster to switch (`rex8s use-context`). rex8s panes are not affected.
 
 Clusters whose login expired offer "Log in" (runs `kauth` in a Rex tab).
 

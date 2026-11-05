@@ -1,0 +1,4 @@
+#!/bin/sh
+# Fake k9s for demo mode (the real one would try to reach example.com).
+printf '\n  k9s is not simulated in demo mode.\n  (context: %s)\n' "$*"
+exec sleep 86400

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"sort"
 
 	"github.com/vitalbh/rex8s/internal/kube"
@@ -42,6 +43,7 @@ type clusterJSON struct {
 	Server    string `json:"server"`
 	Namespace string `json:"namespace"`
 	User      string `json:"user"`
+	Current   bool   `json:"current"` // the master kubeconfig's current-context
 }
 
 type podJSON struct {
@@ -82,7 +84,7 @@ func (a *app) listData(args []string) (any, error) {
 		}
 		out := []clusterJSON{}
 		for _, c := range kube.Contexts(raw, a.cfg) {
-			out = append(out, clusterJSON{Context: c.Name, Short: c.Short, Prod: c.Prod, Server: c.Server, Namespace: c.Namespace, User: c.User})
+			out = append(out, clusterJSON{Context: c.Name, Short: c.Short, Prod: c.Prod, Server: c.Server, Namespace: c.Namespace, User: c.User, Current: c.Name == raw.CurrentContext})
 		}
 		return out, nil
 	}
@@ -247,4 +249,19 @@ func (a *app) freconcile(args []string) error {
 		return err
 	}
 	return reconcile(cl, c, kube.FluxItem{Kind: args[1], Namespace: args[2], Name: args[3]})
+}
+
+// useContext sets the master kubeconfig's current-context: the default for
+// shells and tools outside rex8s panes. Panes are not affected.
+func (a *app) useContext(name string) error {
+	if _, err := a.context(name); err != nil {
+		return err
+	}
+	k, err := a.kubectl()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(k, "config", "use-context", name, "--kubeconfig", a.src)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	return cmd.Run()
 }
