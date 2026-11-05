@@ -1,0 +1,79 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "rex8s",
+  "title": "rex8s",
+  "description": "Open Kubernetes clusters, pod logs and port-forwards as Rex tabs (via rex8s).",
+  "icon": "extension-icon.png",
+  "author": "vitalbh",
+  "license": "MIT",
+  "categories": [
+    "Developer Tools"
+  ],
+  "commands": [
+    {
+      "name": "open-cluster",
+      "title": "Open Cluster",
+      "subtitle": "rex8s",
+      "description": "Open a cluster shell or k9s layout in Rex.",
+      "mode": "view"
+    },
+    {
+      "name": "search-pods",
+      "title": "Search Pods",
+      "subtitle": "rex8s",
+      "description": "Search pods across a cluster and follow their logs in Rex.",
+      "mode": "view"
+    },
+    {
+      "name": "search-services",
+      "title": "Search Services",
+      "subtitle": "rex8s",
+      "description": "Search services across a cluster and port-forward them in Rex.",
+      "mode": "view"
+    },
+    {
+      "name": "flux-status",
+      "title": "Flux Status",
+      "subtitle": "rex8s",
+      "description": "Flux health of every cluster in the menu bar.",
+      "mode": "menu-bar",
+      "interval": "2m"
+    },
+    {
+      "name": "search-flux",
+      "title": "Search Flux",
+      "subtitle": "rex8s",
+      "description": "Search Flux Kustomizations, HelmReleases and GitRepositories; reconcile them.",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "rexK8s",
+      "title": "rex8s binary",
+      "description": "Path to rex8s.",
+      "type": "textfield",
+      "required": false,
+      "default": "~/.config/rex/rex8s/bin/rex8s"
+    },
+    {
+      "name": "rexApp",
+      "title": "Rex app name",
+      "description": "Brought to the front after opening a tab.",
+      "type": "textfield",
+      "required": false,
+      "default": "Rex Beta"
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^2.11.0",
+    "@raycast/utils": "^2.3.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "ray build",
+    "dev": "ray develop"
+  }
+}

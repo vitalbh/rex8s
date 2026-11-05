@@ -1,0 +1,9 @@
+# Demo config (used when demo mode is on). See ../README.md.
+clusters:
+  - { match: k8s.us-east.example.com,  name: use,     prod: true }
+  - { match: k8s.eu-west.example.com,  name: euw,     prod: true }
+  - { match: k8s.staging.example.com,  name: staging }
+  - { match: k8s.sa-east.example.com, name: sa,    prod: true }
+login_url: https://login.example.com/
+notifications: false
+ai_command: claude
