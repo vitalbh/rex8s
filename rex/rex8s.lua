@@ -9,16 +9,30 @@ end
 local function check(r, err) if err ~= nil then error(err, 0) end; return r end
 local function with_ns(argv, ns) if ns and ns ~= "" then argv[#argv + 1] = ns end; return argv end
 
--- floating popup with the cluster picker
+-- new tab with the cluster picker; the tab becomes the cluster (or the k9s
+-- layout), or closes on esc
 local function picker(mode)
   return function(ctx, args)
-    check(rex.session.new_layer{
-      bounds = { 0.12, 0.1, 0.76, 0.75 },   -- wide enough for the preview (>= 84 columns)
-      focus  = true,
-      layout = term({ K8S, "pick", mode }, "k8s"),
-    })
+    local w = check(rex.session.new_window{ layout = term({ K8S, "pick", mode }, "k8s") })
+    -- the app shows the new tab only when asked to; works when the action
+    -- comes from the app itself (key binding, palette)
+    if w and w.window_id and ctx.origin ~= "api" then
+      -- A client action queued here runs before the app has received the
+      -- new window, so it would be ignored. Queue k8s_focus_window instead:
+      -- the app sends it back to the server (a round trip, after the window
+      -- reached it), and that action queues the select.
+      pcall(rex.client.queue, "k8s_focus_window", { window_id = w.window_id })
+    end
   end
 end
+
+rex.action{
+  name = "k8s_focus_window", title = "Kubernetes: Show Tab (internal)", category = "Kubernetes",
+  args = { window_id = "string" },
+  run  = function(ctx, args)
+    pcall(rex.client.queue, "session.select", { session_id = ctx.session_id, window_id = args.window_id })
+  end,
+}
 
 rex.action{ name = "k8s_pick", title = "Kubernetes: Open Cluster Shell…",  category = "Kubernetes",
             keywords = "k8s kubectl cluster context", run = picker("tab") }

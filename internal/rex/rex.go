@@ -4,12 +4,11 @@ package rex
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"slices"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -74,63 +73,37 @@ func Do(action string, args map[string]any) error {
 	return nil
 }
 
-// DoAndFocus runs an action that opens a window and makes sure that window ends
-// up in front. Called from a floating picker, the new window is activated
-// first and then loses focus when the picker's layer closes (the process
-// exits) and Rex returns focus to the window underneath. So a detached
-// helper focuses the new window again once the picker is gone.
-func DoAndFocus(action string, args map[string]any) error {
-	s := Session()
-	before, _ := windowIDs(s)
-	if err := Do(action, args); err != nil {
-		return err
+// SplitBlock splits block (direction right/left/above/below, the new block
+// gets pct percent) running argv, and returns the new block's ID.
+func SplitBlock(block, direction string, pct int, focus bool, label string, argv ...string) (string, error) {
+	args := []string{"split", "-s", Session(), "--shell=none", "--json", "--label", label, "--split", direction,
+		"--ratio", fmt.Sprint(pct), fmt.Sprintf("--focus=%v", focus)}
+	if block != "" {
+		args = append(args, "-b", block)
 	}
-	if s == "" || before == nil {
-		return nil
-	}
-	after, err := windowIDs(s)
+	args = append(args, "--")
+	args = append(args, argv...)
+	out, err := exec.Command(Bin(), args...).Output()
 	if err != nil {
-		return nil
-	}
-	for _, id := range after {
-		if !slices.Contains(before, id) {
-			focusLater(s, id)
-			break
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return "", fmt.Errorf("rex split: %v: %s", err, strings.TrimSpace(string(ee.Stderr)))
 		}
-	}
-	return nil
-}
-
-// windowIDs lists the session's window IDs (nil when it can't).
-func windowIDs(session string) ([]string, error) {
-	if session == "" {
-		return nil, nil
-	}
-	out, err := exec.Command(Bin(), "window", "ls", "-s", session, "--json").Output()
-	if err != nil {
-		return nil, err
+		return "", err
 	}
 	var v struct {
-		Windows []struct {
-			ID string `json:"window_id"`
-		} `json:"windows"`
+		BlockIDs []string `json:"block_ids"` // [0] is the new block
 	}
-	if err := json.Unmarshal(out, &v); err != nil {
-		return nil, err
+	if err := json.Unmarshal(out, &v); err != nil || len(v.BlockIDs) == 0 {
+		return "", fmt.Errorf("rex split: unexpected output %q", strings.TrimSpace(string(out)))
 	}
-	ids := []string{}
-	for _, w := range v.Windows {
-		ids = append(ids, w.ID)
-	}
-	return ids, nil
+	return v.BlockIDs[0], nil
 }
 
-// focusLater focuses a window from a detached process, after this one exits.
-func focusLater(session, window string) {
-	cmd := exec.Command("/bin/sh", "-c", `sleep 0.4; exec "$0" focus -s "$1" "$2"`, Bin(), session, window)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if cmd.Start() == nil {
-		_ = cmd.Process.Release()
+// CloseSelf closes the current block (its tab, when it is the only one).
+func CloseSelf() {
+	if b := Block(); b != "" {
+		_ = exec.Command(Bin(), "block", "close", "-s", Session(), b).Run()
 	}
 }
 

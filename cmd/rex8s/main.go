@@ -528,12 +528,24 @@ func (a *app) pick(mode string) error {
 		extra = append(extra, tui.Item{Key: restoreKey, Label: fmt.Sprintf("restore %d tab(s)", len(lost)),
 			Hint: restoreLabel(lost), Badge: "WAIT"})
 	}
+	// The picker runs in the new tab itself (Rex focuses a tab created by a
+	// key binding; one created later from a floating picker's process would
+	// stay in the background). The tab becomes the cluster pane or layout,
+	// and closes if the user cancels.
 	c, key, err := a.pickClusterOr("Kubernetes · pick a cluster ("+mode+")", "", extra)
 	if key == restoreKey {
-		return a.restore()
-	}
-	if err != nil || c == nil {
+		err := a.restore()
+		if err == nil {
+			rex.CloseSelf()
+		}
 		return err
+	}
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		rex.CloseSelf()
+		return nil
 	}
 	cl, err := a.client(a.src)
 	if err != nil {
@@ -543,14 +555,36 @@ func (a *app) pick(mode string) error {
 		return err
 	}
 	ns, ok, err := a.pickNamespace("Namespace in "+c.Short, cl, c.Name, "", true)
-	if err != nil || !ok {
+	if err != nil {
 		return err
 	}
-	args := map[string]any{"ctx": c.Name}
-	if ns != "" {
-		args["ns"] = ns
+	if !ok {
+		rex.CloseSelf()
+		return nil
 	}
-	return rex.DoAndFocus("k8s_"+mode, args)
+	if rex.Block() == "" {
+		// outside Rex: just open the shell here
+		return a.pane(c.Name, ns, false)
+	}
+	if mode != "layout" {
+		return a.pane(c.Name, ns, false)
+	}
+	// layout: this block becomes k9s (left); shell on the right, warnings below it
+	self := filepath.Join(a.binDir, "rex8s")
+	shellArgv := []string{self, "pane", "--layout", c.Name}
+	warnArgv := []string{self, "warnings", c.Name}
+	if ns != "" {
+		shellArgv = append(shellArgv, ns)
+		warnArgv = append(warnArgv, ns)
+	}
+	shell, err := rex.SplitBlock(rex.Block(), "right", 40, false, "k8s", shellArgv...)
+	if err != nil {
+		return err
+	}
+	if _, err := rex.SplitBlock(shell, "below", 35, false, "warnings", warnArgv...); err != nil {
+		return err
+	}
+	return a.tool("k9s", c.Name, ns)
 }
 
 func (a *app) pane(ctxName, ns string, layout bool) error {
