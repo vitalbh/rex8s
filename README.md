@@ -201,6 +201,20 @@ rex8s demo off
 demo/record.sh                        # re-record docs/*.gif with VHS (demo mode only for the recording)
 ```
 
+## Known limitations
+
+- **Early version.** Used daily on one setup; expect rough edges.
+- **macOS only.** It relies on the Rex app, `osascript` notifications and macOS
+  terminal behavior.
+- **Tested with Rex Beta 0.1.0 (1758).** rex8s uses the Rex CLI and Lua API,
+  which may still change between beta builds.
+- **Login was only tested with OIDC (Dex).** Other auth methods (EKS
+  `aws eks get-token`, GKE, client certificates) should work for everything
+  except `kauth`, and the "login expired" detection may miss their error
+  messages. Reports welcome.
+- **Flux v2 only** (`kustomize.toolkit.fluxcd.io`, `helm.toolkit.fluxcd.io`,
+  `source.toolkit.fluxcd.io`).
+
 ## Development
 
 ```sh
