@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -70,6 +72,66 @@ func Do(action string, args map[string]any) error {
 		return fmt.Errorf("rex do %s: %v: %s", action, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// DoAndFocus runs an action that opens a window and makes sure that window ends
+// up in front. Called from a floating picker, the new window is activated
+// first and then loses focus when the picker's layer closes (the process
+// exits) and Rex returns focus to the window underneath. So a detached
+// helper focuses the new window again once the picker is gone.
+func DoAndFocus(action string, args map[string]any) error {
+	s := Session()
+	before, _ := windowIDs(s)
+	if err := Do(action, args); err != nil {
+		return err
+	}
+	if s == "" || before == nil {
+		return nil
+	}
+	after, err := windowIDs(s)
+	if err != nil {
+		return nil
+	}
+	for _, id := range after {
+		if !slices.Contains(before, id) {
+			focusLater(s, id)
+			break
+		}
+	}
+	return nil
+}
+
+// windowIDs lists the session's window IDs (nil when it can't).
+func windowIDs(session string) ([]string, error) {
+	if session == "" {
+		return nil, nil
+	}
+	out, err := exec.Command(Bin(), "window", "ls", "-s", session, "--json").Output()
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Windows []struct {
+			ID string `json:"window_id"`
+		} `json:"windows"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		return nil, err
+	}
+	ids := []string{}
+	for _, w := range v.Windows {
+		ids = append(ids, w.ID)
+	}
+	return ids, nil
+}
+
+// focusLater focuses a window from a detached process, after this one exits.
+func focusLater(session, window string) {
+	cmd := exec.Command("/bin/sh", "-c", `sleep 0.4; exec "$0" focus -s "$1" "$2"`, Bin(), session, window)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if cmd.Start() == nil {
+		_ = cmd.Process.Release()
+	}
 }
 
 // Session is the current session (REX_SESSION), or "" outside Rex.

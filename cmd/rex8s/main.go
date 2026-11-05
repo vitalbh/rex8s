@@ -550,7 +550,7 @@ func (a *app) pick(mode string) error {
 	if ns != "" {
 		args["ns"] = ns
 	}
-	return rex.Do("k8s_"+mode, args)
+	return rex.DoAndFocus("k8s_"+mode, args)
 }
 
 func (a *app) pane(ctxName, ns string, layout bool) error {
