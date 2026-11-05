@@ -40,6 +40,14 @@
       "interval": "2m"
     },
     {
+      "name": "failing-pods",
+      "title": "Failing Pods",
+      "subtitle": "rex8s",
+      "description": "Failing pods of every cluster in the menu bar; opens kfail in Rex.",
+      "mode": "menu-bar",
+      "interval": "2m"
+    },
+    {
       "name": "search-flux",
       "title": "Search Flux",
       "subtitle": "rex8s",
@@ -50,7 +58,7 @@
       "name": "kube-context",
       "title": "Kube Context",
       "subtitle": "rex8s",
-      "description": "Show and switch the machine's default Kubernetes context in the menu bar.",
+      "description": "Show and switch the machine's default Kubernetes context in the menu bar, with the running port-forwards.",
       "mode": "menu-bar",
       "interval": "1m"
     }

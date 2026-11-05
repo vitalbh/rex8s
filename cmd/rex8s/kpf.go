@@ -3,13 +3,17 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
@@ -92,8 +96,26 @@ func freePort(want int) int {
 }
 
 // kpf: pick a service (and port) in the current namespace and port-forward
-// it in a pane next to this one.
-func (a *app) kpf(filter string) error {
+// it in a pane next to this one. kpf -l lists the running ones; kpf --stop
+// PID stops one (for Raycast).
+func (a *app) kpf(args []string) error {
+	filter := ""
+	if len(args) > 0 {
+		switch args[0] {
+		case "-l", "ls", "list":
+			return a.kpfList()
+		case "--stop":
+			if len(args) < 2 {
+				return errors.New("kpf --stop PID")
+			}
+			pid, err := strconv.Atoi(args[1])
+			if err != nil {
+				return fmt.Errorf("bad pid %q", args[1])
+			}
+			return a.pfStop(pid)
+		}
+		filter = args[0]
+	}
 	c, err := kube.Current(a.cfg, "", "")
 	if err != nil {
 		return err
@@ -193,7 +215,26 @@ func (a *app) pftail(ctxName, ns, svc, mapping string) error {
 	cmd := exec.Command(bin, "--context", ctxName, "-n", ns, "port-forward", "svc/"+svc, mapping)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-	_ = cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	lp, _ := strconv.Atoi(local)
+	rp, _ := strconv.Atoi(strings.SplitN(mapping, ":", 2)[1])
+	unregister := a.pfRegister(pfEntry{PID: os.Getpid(), Context: ctxName, Short: c.Short, Prod: c.Prod,
+		Namespace: ns, Service: svc, Local: lp, Remote: rp, Started: time.Now()})
+	defer unregister()
+
+	// stopped from kpf -l or Raycast: end the forward and close the pane
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sig
+		_ = cmd.Process.Kill()
+		unregister()
+		rex.CloseSelf()
+		os.Exit(0)
+	}()
+	_ = cmd.Wait()
 	fmt.Fprint(os.Stderr, tui.Dim.Render("\nport-forward ended · press enter to close"))
 	bufio.NewReader(os.Stdin).ReadString('\n')
 	return nil

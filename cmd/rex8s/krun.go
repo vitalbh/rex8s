@@ -43,7 +43,7 @@ func (a *app) krun(args []string) error {
 	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
 
 	var skipped []string
-	targets, err := a.pickTargets(k, clusters, filter, &skipped)
+	targets, _, err := a.pickTargets(k, clusters, filter, "Run in which workloads?", &skipped)
 	for _, s := range skipped {
 		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
 	}
@@ -176,9 +176,13 @@ func parseKrunArgs(args []string) (filter, container string, command []string, e
 // confirmRun: a y/N question, for runs that touch production (the plan with
 // every workload and pod count is printed right above it).
 func confirmRun(cmdText string, pods int, prod []string) bool {
+	return confirmProd(fmt.Sprintf("Run %q in %d pod(s) on", cmdText, pods), prod)
+}
+
+// confirmProd asks "<question> <prod clusters>? [y/N]" on the terminal.
+func confirmProd(question string, prod []string) bool {
 	fmt.Fprintf(os.Stderr, "\n%s %s %s %s",
-		tui.Prod.Render(" PROD "),
-		fmt.Sprintf("Run %q in %d pod(s) on", cmdText, pods),
+		tui.Prod.Render(" PROD "), question,
 		tui.Bold.Render(strings.Join(prod, ", "))+"?",
 		tui.Dim.Render("[y/N] "))
 	tty, err := os.Open("/dev/tty")
@@ -192,6 +196,20 @@ func confirmRun(cmdText string, pods int, prod []string) bool {
 		return true
 	}
 	return false
+}
+
+// prodClusters: the production clusters among the targets, sorted.
+func prodClusters(ts []target) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range ts {
+		if t.c.Prod && !seen[t.c.Short] {
+			seen[t.c.Short] = true
+			out = append(out, t.c.Short)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // askCommand prompts for the command after the pick ("" cancels).
@@ -246,7 +264,10 @@ type target struct {
 	c                     kube.Context
 	Kind, Namespace, Name string
 	Selector              string
+	Containers            []containerImage
 }
+
+type containerImage struct{ Name, Image string }
 
 func (t target) key() string { return t.c.Name + "|" + t.Kind + "/" + t.Namespace + "/" + t.Name }
 
@@ -322,6 +343,14 @@ func parseWorkloadSelectors(data []byte) ([]target, error) {
 				Selector struct {
 					MatchLabels map[string]string `json:"matchLabels"`
 				} `json:"selector"`
+				Template struct {
+					Spec struct {
+						Containers []struct {
+							Name  string `json:"name"`
+							Image string `json:"image"`
+						} `json:"containers"`
+					} `json:"spec"`
+				} `json:"template"`
 			} `json:"spec"`
 		} `json:"items"`
 	}
@@ -335,7 +364,11 @@ func parseWorkloadSelectors(data []byte) ([]target, error) {
 			sel = append(sel, k+"="+v)
 		}
 		sort.Strings(sel)
-		out = append(out, target{Kind: it.Kind, Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Selector: strings.Join(sel, ",")})
+		t := target{Kind: it.Kind, Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Selector: strings.Join(sel, ",")}
+		for _, c := range it.Spec.Template.Spec.Containers {
+			t.Containers = append(t.Containers, containerImage{c.Name, c.Image})
+		}
+		out = append(out, t)
 	}
 	return out, nil
 }
@@ -344,10 +377,10 @@ func parseWorkloadSelectors(data []byte) ([]target, error) {
 // cluster (one row per workload per cluster: names may differ between
 // clusters), filtered by filter, which the user can edit. Marked rows (or the
 // one under the cursor) are returned. With a filter that matches exactly one
-// workload, no picker.
-func (a *app) pickTargets(k string, clusters []kube.Context, filter string, skipped *[]string) ([]target, error) {
+// workload, no picker. all is every workload loaded (for callers that look
+// for the same workload on other clusters).
+func (a *app) pickTargets(k string, clusters []kube.Context, filter, title string, skipped *[]string) (chosen, all []target, err error) {
 	byKey := map[string]target{}
-	var all []target
 	load := func() ([]tui.Item, error) {
 		var sk []string
 		all, sk = a.findWorkloads(k, clusters, "")
@@ -379,7 +412,7 @@ func (a *app) pickTargets(k string, clusters []kube.Context, filter string, skip
 		fmt.Fprintln(os.Stderr, tui.Dim.Render(fmt.Sprintf("looking for %q in %d clusters…", filter, len(clusters))))
 		items, err := load()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var hits []target
 		for _, t := range all {
@@ -388,11 +421,13 @@ func (a *app) pickTargets(k string, clusters []kube.Context, filter string, skip
 			}
 		}
 		if len(hits) == 1 {
-			return hits, nil
+			return hits, all, nil
 		}
-		return runTargetPicker(tui.Options{Title: "Run in which workloads?", Items: items, Query: filter}, byKey)
+		chosen, err = runTargetPicker(tui.Options{Title: title, Items: items, Query: filter}, byKey)
+		return chosen, all, err
 	}
-	return runTargetPicker(tui.Options{Title: fmt.Sprintf("Run in which workloads? (%d clusters)", len(clusters)), Load: load}, byKey)
+	chosen, err = runTargetPicker(tui.Options{Title: fmt.Sprintf("%s (%d clusters)", title, len(clusters)), Load: load}, byKey)
+	return chosen, all, err
 }
 
 func runTargetPicker(o tui.Options, byKey map[string]target) ([]target, error) {

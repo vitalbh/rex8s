@@ -126,3 +126,29 @@ export async function reconcile(ctx: string, it: FluxItem): Promise<string> {
   const out = (await run(prefs().rexK8s, ["freconcile", ctx, it.kind, it.namespace, it.name])).replace(/\x1b\[[0-9;]*m/g, "");
   return out.trim().split("\n").pop() ?? "";
 }
+
+export type ClusterFailing = {
+  context: string;
+  short: string;
+  prod: boolean;
+  error?: string;
+  loginExpired?: boolean;
+  pods: Pod[];
+};
+
+export type PortForward = {
+  pid: number;
+  context: string;
+  short: string;
+  prod: boolean;
+  namespace: string;
+  service: string;
+  local: number;
+  remote: number;
+  started: string;
+};
+
+/** Stops a running port-forward (its Rex pane closes). */
+export async function stopPortForward(pid: number): Promise<void> {
+  await run(prefs().rexK8s, ["kpf", "--stop", String(pid)]);
+}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"sync"
 
 	"github.com/vitalbh/rex8s/internal/kube"
 )
@@ -18,6 +19,8 @@ import (
 //	rex8s list services CTX [NS]
 //	rex8s list flux                Flux health of every cluster (menu bar)
 //	rex8s list flux CTX            Flux resources of one cluster
+//	rex8s list failing             failing pods of every cluster (menu bar)
+//	rex8s list pf                  running port-forwards
 //
 // Errors are JSON too: {"error": "...", "loginExpired": true}.
 func (a *app) list(args []string) error {
@@ -76,6 +79,12 @@ func (a *app) listData(args []string) (any, error) {
 	}
 	if args[0] == "flux" && len(args) == 1 {
 		return a.fluxHealthAll()
+	}
+	if args[0] == "failing" {
+		return a.failingAll()
+	}
+	if args[0] == "pf" {
+		return a.pfList(), nil
 	}
 	if args[0] == "clusters" {
 		raw, err := kube.Load(a.src)
@@ -264,4 +273,59 @@ func (a *app) useContext(name string) error {
 	cmd := exec.Command(k, "config", "use-context", name, "--kubeconfig", a.src)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	return cmd.Run()
+}
+
+type clusterFailingJSON struct {
+	Context      string    `json:"context"`
+	Short        string    `json:"short"`
+	Prod         bool      `json:"prod"`
+	Error        string    `json:"error,omitempty"`
+	LoginExpired bool      `json:"loginExpired,omitempty"`
+	Pods         []podJSON `json:"pods"`
+}
+
+// failingAll lists, for every cluster in parallel, the pods that should be
+// running and are broken (crash loops, image pulls, config errors). Finished
+// pods (Failed/Succeeded) and running-but-restarted ones stay in kfail only.
+func (a *app) failingAll() ([]clusterFailingJSON, error) {
+	raw, err := kube.Load(a.src)
+	if err != nil {
+		return nil, err
+	}
+	clusters := dedupe(kube.Contexts(raw, a.cfg))
+	cl, err := a.client(a.src)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]clusterFailingJSON, len(clusters))
+	var wg sync.WaitGroup
+	for i, c := range clusters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			j := clusterFailingJSON{Context: c.Name, Short: c.Short, Prod: c.Prod, Pods: []podJSON{}}
+			data, err := cl.Get(c.Name, "get", "pods", "-A", "-o", "json")
+			var ps []pod
+			if err == nil {
+				ps, err = parsePods(data)
+			}
+			if err != nil {
+				j.Error, j.LoginExpired = lastLogLine(err.Error()), kube.AuthExpired(err)
+			}
+			for _, p := range failingPods(ps) {
+				if !brokenLive(p) {
+					continue
+				}
+				j.Pods = append(j.Pods, podJSON{Namespace: p.Namespace, Name: p.Name, Status: p.status(), Badge: failBadge(p),
+					Ready: p.Ready, Total: p.Total, Restarts: p.Restarts, Age: age(p.Created), Containers: p.Containers})
+			}
+			out[i] = j
+		}()
+	}
+	wg.Wait()
+	return out, nil
+}
+
+func brokenLive(p pod) bool {
+	return p.badge() == "FAIL" && p.Phase != "Failed" && p.Phase != "Succeeded"
 }

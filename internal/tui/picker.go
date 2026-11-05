@@ -325,7 +325,7 @@ func (m model) View() string {
 		if n := len(m.markedItems()); n > 0 {
 			title += "  " + selRow.Render(fmt.Sprintf("%d marked", n))
 		}
-		help = "space mark · ctrl+a mark all shown · enter run on marked (or this one) · esc quit · type to filter"
+		help = "space mark · ctrl+a mark all shown · enter go with the marked (or this one) · esc quit · type to filter"
 	}
 	b.WriteString(title + "\n")
 	b.WriteString(dim.Render(help) + "\n")

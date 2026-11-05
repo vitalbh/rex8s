@@ -22,7 +22,7 @@ export DEMO_EUW="$state/euw.yaml:$root/demo/kubeconfig"
 
 tapes=${1:-}
 for t in demo/tapes/${tapes:-*}.tape; do
-  rm -f "$state/fwatch-t0"
+  rm -f "$state/fwatch-t0" "$state"/restart-*
   echo "recording $t"
   vhs "$t"
 done

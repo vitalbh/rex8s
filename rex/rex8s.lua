@@ -104,6 +104,18 @@ rex.action{
   end,
 }
 
+-- new tab: the failing pods of a cluster (kfail), used by the Raycast menu bar
+rex.action{
+  name = "k8s_fail", title = "Kubernetes: Failing Pods (ctx)", category = "Kubernetes",
+  args = { ctx = "string", filter = "string?" },
+  run  = function(ctx, args)
+    local script = '"$0" kfail --wait --context "$1" "$2" || { printf "\\npress enter to close"; read -r _; }'
+    check(rex.session.new_window{
+      layout = rex.layout.block{ flavor = SHELL, label = "kfail",
+        options = { command = { "/bin/sh", "-c", script, K8S, args.ctx, args.filter or "" }, shell = "none" } } })
+  end,
+}
+
 -- new tab: log in again to a cluster (kauth), used by the Raycast extension
 rex.action{
   name = "k8s_kauth", title = "Kubernetes: Log In (ctx)", category = "Kubernetes",

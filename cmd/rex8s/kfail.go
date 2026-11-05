@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,18 +20,40 @@ const failLogLines = 30
 // preview — the previous container's logs when it crashed. Logs are fetched
 // only for the pod under the cursor. Enter offers logs / why / shell /
 // describe / events.
+//
+// --context CTX picks the cluster instead of this pane's (Raycast opens kfail
+// in a tab of its own that way); --wait keeps describe/events output on
+// screen until enter.
 func (a *app) kfail(args []string) error {
-	allNS, filter := true, ""
-	for _, arg := range args {
-		if arg == "-n" {
+	allNS, filter, ctxName, wait := true, "", "", false
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "-n":
 			allNS = false
-		} else {
+		case arg == "--wait":
+			wait = true
+		case arg == "--context" && i+1 < len(args):
+			ctxName = args[i+1]
+			i++
+		default:
 			filter = arg
 		}
 	}
-	c, err := kube.Current(a.cfg, "", "")
+	var c kube.Context
+	var err error
+	if ctxName != "" {
+		c, err = a.context(ctxName)
+	} else {
+		c, err = kube.Current(a.cfg, "", "")
+	}
 	if err != nil {
 		return err
+	}
+	pause := func() {
+		if wait {
+			fmt.Fprint(os.Stderr, tui.Dim.Render("\npress enter to close"))
+			bufio.NewReader(os.Stdin).ReadString('\n')
+		}
 	}
 	cl, err := a.client(a.src)
 	if err != nil {
@@ -125,9 +149,11 @@ func (a *app) kfail(args []string) error {
 		}
 		return rex.Split("why "+p.Name, self, "whytail", c.Name, p.Namespace, p.Name)
 	case "describe":
+		defer pause()
 		return a.runKubectl(false, "--context", c.Name, "-n", p.Namespace, "describe", "pod", p.Name)
 	case "events":
 		fmt.Println(objectEvents(cl, c.Name, p.Namespace, "Pod", p.Name, 0))
+		pause()
 	}
 	return nil
 }

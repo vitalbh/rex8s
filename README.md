@@ -57,6 +57,23 @@ with Flux (GitOps) built in.
   workload matches. Production asks once, with a y/N.
 - **`klogs`**, **`kexec`**, **`kpf`**: pick a pod or service and follow logs,
   open a shell in it, or port-forward it — in a split next to your shell.
+  `kpf -l` lists the running port-forwards: open, copy the URL or stop one
+  (they also show in the Kube Context menu bar).
+- **`knode`**: pick a node and get a shell on it in a split (`kubectl debug
+  node`, the node's filesystem at `/host`). The debug pod is removed when you
+  exit. Production asks first.
+
+**Across clusters**
+
+- **`kver`**: which version runs where — the image tag of every workload, one
+  column per cluster. Rows that differ come first and are highlighted; `-d`
+  shows only those.
+- **`kdiff`**: compare a workload's spec between two clusters (YAML, without
+  status and the fields the API server fills in). Pick one row and it finds the
+  same name on the other cluster, or mark two rows.
+- **`kroll`**: restart the workloads you mark (same picker as `krun`) and follow
+  each rollout until it is done, with progress in the tab header. Production
+  asks once, with a y/N.
 
 ### See it
 
@@ -73,6 +90,10 @@ with Flux (GitOps) built in.
 | ![kfail](docs/kfail.gif) | ![kjobs](docs/kjobs.gif) |
 | **`kstatus`**: the cluster's health on one screen | **`krun`**: one command, every pod, several clusters |
 | ![kstatus](docs/kstatus.gif) | ![krun](docs/krun.gif) |
+| **`kver`**: which version runs on which cluster | **`kdiff`**: the same workload on two clusters |
+| ![kver](docs/kver.gif) | ![kdiff](docs/kdiff.gif) |
+| **`kroll`**: restart workloads and follow the rollouts | **`knode`**: a shell on a node |
+| ![kroll](docs/kroll.gif) | ![knode](docs/knode.gif) |
 
 All recordings use the built-in demo mode (fake `example.com` clusters) — see [Demo mode](#demo-mode).
 
@@ -131,6 +152,7 @@ login_url: https://login.example.com       # page kauth opens (per cluster: clus
 notifications: true                        # macOS notifications (fwatch, monitor)
 ai_command: claude                         # CLI used by kwhy
 ai_language: en                            # language kwhy answers in
+node_debug_image: busybox:1.36             # image knode runs on the node
 ```
 
 Without a config file nothing is treated as production and short names come
@@ -151,11 +173,16 @@ from the context name.
 | `kstatus [-w]` | cluster health on one screen (`-w`: refresh every 30s) |
 | `kjobs [-n] [failed\|running\|done\|suspended\|cron] [filter]` | Jobs and CronJobs; enter: logs, run now, rerun, suspend/resume, delete |
 | `krun [-c container] [name] [-- CMD...]` | pick workloads on any cluster, run CMD in all their pods |
+| `kver [-d] [filter]` | image tag of every workload on every cluster (`-d`: only where they differ) |
+| `kdiff [filter]` | compare a workload's spec between two clusters |
+| `kroll [filter]` | pick workloads on any cluster, `rollout restart` them and follow the rollouts |
+| `knode [filter]` | shell on a node of this pane's cluster, in a split (`kubectl debug node`) |
 | `kfail [-n] [filter]` | failing pods (all namespaces; `-n` this namespace) with events and last logs; enter: logs, why, shell, describe |
 | `kwarn [-n]` | stream Warning events (all namespaces; `-n` this namespace) |
 | `klogs [filter]` | follow a pod's logs in a split |
 | `kexec [filter]` | shell into a pod in a split |
 | `kpf [filter]` | port-forward a service in a split, on a free local port |
+| `kpf -l` | running port-forwards: open, copy the URL, stop |
 | `rex8s use-context CTX` | set the machine's default context (what `kubectl` uses outside rex8s panes) |
 | `REX8S_FORCE=1 kubectl ...` | skip the production confirmation (scripts) |
 
@@ -177,7 +204,7 @@ Everything outside Rex is optional. How to turn each one on or off:
 | **Flux CLI** (`flux`) | `fdiff` | install it (`brew install fluxcd/tap/flux`) | don't use `fdiff` |
 | **k9s** | `Cmd+Shift+K` layout | install it | use `Cmd+Shift+J` |
 | **Raycast extension** | Open Cluster, Search Pods/Services/Flux, Flux Status menu bar | `cd raycast && npm install && npm run dev` | Raycast → Extensions → Rex Kubernetes → Uninstall (or disable single commands there) |
-| **Raycast menu bar** | Flux Status, Kube Context | enable the "Flux Status" / "Kube Context" commands in Raycast | disable those commands in Raycast settings |
+| **Raycast menu bar** | Flux Status, Failing Pods, Kube Context | enable the "Flux Status" / "Failing Pods" / "Kube Context" commands in Raycast | disable those commands in Raycast settings |
 | **Cluster alerts** | `kstatus` | automatic when an Alertmanager (port 9093) or Prometheus (9090) service runs in the cluster; read through the API server proxy | nothing to turn off: no such service, no Alerts line |
 | **Production guard** | `kubectl`/`helm`/`flux` in panes | default | `REX8S_FORCE=1` per command |
 
@@ -194,7 +221,8 @@ turn it off with `ai_command: off` where that isn't acceptable.
 - **Search Services** — every service; port-forward on a free local port in a Rex tab.
 - **Search Flux** — every Flux resource with its message; reconcile and wait for the result.
 - **Flux Status** — menu bar icon: green when healthy, red with the number of failing resources.
-- **Kube Context** — menu bar: the machine's default context (`~/.kube/config`), red when it is production; click a cluster to switch (`rex8s use-context`). rex8s panes are not affected.
+- **Failing Pods** — menu bar: the number of broken pods across every cluster — crash loops, image pulls, config errors; finished pods are left out — red when one is in production. Click a pod to open `kfail` on it in a Rex tab.
+- **Kube Context** — menu bar: the machine's default context (`~/.kube/config`), red when it is production; click a cluster to switch (`rex8s use-context`). rex8s panes are not affected. Also lists the running port-forwards: open, copy the URL or stop.
 
 Clusters whose login expired offer "Log in" (runs `kauth` in a Rex tab).
 

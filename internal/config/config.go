@@ -43,6 +43,8 @@ type Config struct {
 	// Notifications: macOS notifications from fwatch and the Flux monitor.
 	// Default true; set false to turn them off.
 	Notifications *bool `json:"notifications"`
+	// NodeDebugImage is the image knode runs on the node. Default busybox.
+	NodeDebugImage string `json:"node_debug_image"`
 
 	path string
 }

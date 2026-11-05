@@ -26,6 +26,8 @@ declare namespace Preferences {
   export type SearchServices = ExtensionPreferences & {}
   /** Preferences accessible in the `flux-status` command */
   export type FluxStatus = ExtensionPreferences & {}
+  /** Preferences accessible in the `failing-pods` command */
+  export type FailingPods = ExtensionPreferences & {}
   /** Preferences accessible in the `search-flux` command */
   export type SearchFlux = ExtensionPreferences & {}
   /** Preferences accessible in the `kube-context` command */
@@ -41,6 +43,8 @@ declare namespace Arguments {
   export type SearchServices = {}
   /** Arguments passed to the `flux-status` command */
   export type FluxStatus = {}
+  /** Arguments passed to the `failing-pods` command */
+  export type FailingPods = {}
   /** Arguments passed to the `search-flux` command */
   export type SearchFlux = {}
   /** Arguments passed to the `kube-context` command */

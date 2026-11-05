@@ -1,12 +1,14 @@
-import { Color, Icon, MenuBarExtra, showHUD } from "@raycast/api";
+import { Clipboard, Color, Icon, MenuBarExtra, open, showHUD } from "@raycast/api";
 import { useCachedPromise } from "@raycast/utils";
-import { Cluster, list, rexDo, useContext } from "./rex";
+import { Cluster, list, PortForward, rexDo, stopPortForward, useContext } from "./rex";
 
 export default function Command() {
   const { data, isLoading, revalidate } = useCachedPromise(() => list<Cluster[]>("clusters"), [], {
     keepPreviousData: true,
   });
   const clusters = data ?? [];
+  const pf = useCachedPromise(() => list<PortForward[]>("pf"), [], { keepPreviousData: true });
+  const forwards = pf.data ?? [];
   const current = clusters.find((c) => c.current);
   // aliases of the same cluster share a short name: show the context to tell them apart
   const dup = (c: Cluster) => clusters.filter((o) => o.short === c.short).length > 1;
@@ -36,6 +38,36 @@ export default function Command() {
           />
         ))}
       </MenuBarExtra.Section>
+      {forwards.length > 0 && (
+        <MenuBarExtra.Section title="Port-forwards">
+          {forwards.map((f) => (
+            <MenuBarExtra.Submenu
+              key={f.pid}
+              icon={{ source: Icon.Plug, tintColor: f.prod ? Color.Red : Color.Green }}
+              title={`localhost:${f.local} → ${f.short} ${f.namespace}/${f.service}:${f.remote}`}
+            >
+              <MenuBarExtra.Item title="Open in Browser" icon={Icon.Globe} onAction={() => open(`http://localhost:${f.local}`)} />
+              <MenuBarExtra.Item
+                title="Copy URL"
+                icon={Icon.Clipboard}
+                onAction={async () => {
+                  await Clipboard.copy(`http://localhost:${f.local}`);
+                  await showHUD(`Copied http://localhost:${f.local}`);
+                }}
+              />
+              <MenuBarExtra.Item
+                title="Stop"
+                icon={Icon.Stop}
+                onAction={async () => {
+                  await stopPortForward(f.pid);
+                  await showHUD(`Stopped ${f.service} (${f.short})`);
+                  pf.revalidate();
+                }}
+              />
+            </MenuBarExtra.Submenu>
+          ))}
+        </MenuBarExtra.Section>
+      )}
       {current && (
         <MenuBarExtra.Section>
           <MenuBarExtra.Item
@@ -50,7 +82,10 @@ export default function Command() {
           title="Refresh"
           icon={Icon.ArrowClockwise}
           shortcut={{ modifiers: ["cmd"], key: "r" }}
-          onAction={() => revalidate()}
+          onAction={() => {
+            revalidate();
+            pf.revalidate();
+          }}
         />
       </MenuBarExtra.Section>
     </MenuBarExtra>
