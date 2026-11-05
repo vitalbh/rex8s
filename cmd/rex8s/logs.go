@@ -21,6 +21,7 @@ type pod struct {
 	Name       string
 	Phase      string
 	Reason     string // e.g. CrashLoopBackOff
+	LastReason string // why a container last terminated, e.g. OOMKilled
 	Ready      int
 	Total      int
 	Restarts   int
@@ -56,6 +57,11 @@ func parsePods(data []byte) ([]pod, error) {
 							Reason string `json:"reason"`
 						} `json:"terminated"`
 					} `json:"state"`
+					LastState struct {
+						Terminated *struct {
+							Reason string `json:"reason"`
+						} `json:"terminated"`
+					} `json:"lastState"`
 				} `json:"containerStatuses"`
 			} `json:"status"`
 		} `json:"items"`
@@ -83,6 +89,9 @@ func parsePods(data []byte) ([]pod, error) {
 			}
 			if p.Reason == "" && cs.State.Terminated != nil && it.Status.Phase == "Running" {
 				p.Reason = cs.State.Terminated.Reason
+			}
+			if p.LastReason == "" && cs.LastState.Terminated != nil {
+				p.LastReason = cs.LastState.Terminated.Reason
 			}
 		}
 		out = append(out, p)

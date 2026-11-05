@@ -280,6 +280,8 @@ def logs(pos, flags):
     key = "worker" if name.startswith("worker") else "search" if name.startswith("search") else "default"
     lines = LOGS[key]
     prefix = "[pod/%s/app] " % name if "--prefix" in flags else ""
+    if name.startswith("payments-api"):
+        die("Error from server (BadRequest): container \"app\" in pod \"%s\" is waiting to start: trying and failing to pull image" % name)
     if "--previous" in flags and key == "default":
         die("Error from server (BadRequest): previous terminated container \"app\" in pod \"%s\" not found" % name)
     for l in lines:

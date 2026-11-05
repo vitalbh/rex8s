@@ -139,8 +139,13 @@ func fluxHead(f kube.FluxItem) string {
 
 // fluxEvents returns the item's recent events, oldest first (max lines; 0 = all).
 func fluxEvents(cl kube.Client, ctxName string, f kube.FluxItem, max int) string {
-	out, err := cl.Get(ctxName, "get", "events", "-n", f.Namespace, "-o", "json",
-		"--field-selector", "involvedObject.kind="+f.Kind+",involvedObject.name="+f.Name)
+	return objectEvents(cl, ctxName, f.Namespace, f.Kind, f.Name, max)
+}
+
+// objectEvents renders the last max events of one object (all when max <= 0).
+func objectEvents(cl kube.Client, ctxName, ns, kind, name string, max int) string {
+	out, err := cl.Get(ctxName, "get", "events", "-n", ns, "-o", "json",
+		"--field-selector", "involvedObject.kind="+kind+",involvedObject.name="+name)
 	if err != nil {
 		return tui.Err.Render("events: " + err.Error())
 	}

@@ -38,6 +38,9 @@ with Flux (GitOps) built in.
 
 - **`kwhy`**: pick a pod and ask Claude why it is unhealthy (describe with env
   values redacted, events, current and previous logs; tools disabled).
+- **`kfail`**: only the unhealthy pods of the cluster, with their recent events and
+  last log lines in the preview — the crashed container's logs when it restarted.
+  Logs are fetched only for the pod under the cursor.
 - **`kwarn`**: only Warning events (OOMKilled, BackOff, probes, image pulls),
   deduplicated. Also the bottom pane of the k9s layout.
 - **`klogs`**, **`kexec`**, **`kpf`**: pick a pod or service and follow logs,
@@ -54,6 +57,8 @@ with Flux (GitOps) built in.
 | ![fwatch](docs/fwatch.gif) | ![kwhy](docs/kwhy.gif) |
 | **`kflux`**: Flux resources, failing first | **`kwarn`**: only Warning events, live |
 | ![kflux](docs/kflux.gif) | ![kwarn](docs/kwarn.gif) |
+| **`kfail`**: failing pods with the crashed container's last logs | |
+| ![kfail](docs/kfail.gif) | |
 
 All recordings use the built-in demo mode (fake `example.com` clusters) — see [Demo mode](#demo-mode).
 
@@ -129,6 +134,7 @@ from the context name.
 | `fwatch [-A] [--now]` | inside a git repo: follow HEAD until Flux applied it and it rolled out |
 | `kflux` | Flux resources on this pane's cluster |
 | `kwhy [filter]` | ask Claude why a pod is unhealthy |
+| `kfail [-n] [filter]` | failing pods (all namespaces; `-n` this namespace) with events and last logs; enter: logs, why, shell, describe |
 | `kwarn [-n]` | stream Warning events (all namespaces; `-n` this namespace) |
 | `klogs [filter]` | follow a pod's logs in a split |
 | `kexec [filter]` | shell into a pod in a split |
@@ -180,9 +186,9 @@ Clusters whose login expired offer "Log in" (runs `kauth` in a Rex tab).
 | **Search Services** | **Open Cluster** |
 | ![Search Services](docs/raycast-services.png) | ![Open Cluster](docs/raycast-clusters.png) |
 
-**Flux Status** in the menu bar:
-
-![Flux Status menu bar](docs/raycast-menubar.png)
+| **Flux Status** (menu bar) | **Kube Context** (menu bar) |
+|---|---|
+| ![Flux Status menu bar](docs/raycast-menubar.png) | ![Kube Context menu bar](docs/raycast-context.png) |
 
 ```sh
 cd raycast && npm install && npm run dev   # imports it into Raycast
