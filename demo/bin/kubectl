@@ -53,6 +53,18 @@ def parse(argv):
     return flags, pos, rest
 
 
+def pane_namespace():
+    """The namespace of the first kubeconfig in KUBECONFIG (a rex8s pane file)."""
+    for f in (os.environ.get("KUBECONFIG") or "").split(":")[:1]:
+        try:
+            m = re.search(r"namespace:\s*\"?([A-Za-z0-9*-]+)", open(f).read())
+            if m and m.group(1) != "*":
+                return m.group(1)
+        except OSError:
+            pass
+    return None
+
+
 def current_context(flags):
     if "--context" in flags:
         return flags["--context"]
@@ -168,6 +180,40 @@ def restarted(ctx, name):
     return ago if ago < 600 else None
 
 
+# rollout history per cluster (kwhat demo): deployment → (previous tag, minutes ago) of the current rollout
+ROLLOUTS = {
+    "acme-prod-use": {"api": ("1.41.3", 22), "worker": ("1.41.3", 22), "nginx": (None, 41)},
+    "acme-staging": {"api": ("1.42.0", 8), "worker": ("1.42.0", 8)},
+    "acme-prod-euw": {"search": ("2.17.1", 35)},
+}
+
+
+def replicasets(ctx):
+    out = []
+    for w in workloads(ctx):
+        name, ns = w["metadata"]["name"], w["metadata"]["namespace"]
+        tpl = w["spec"]["template"]
+        image = tpl["spec"]["containers"][0]["image"]
+        base = name.split("-")[0] if name.startswith("nginx") else name
+        prev_tag, mins = ROLLOUTS.get(ctx, {}).get(base, ("", 3 * 24 * 60))
+        rev = w["metadata"]["generation"]
+
+        def rs(suffix, revision, img, ago_min, restarted=None):
+            ann = {"kubectl.kubernetes.io/restartedAt": restarted} if restarted else {}
+            return {"metadata": {"name": "%s-%s" % (name, suffix), "namespace": ns, "creationTimestamp": ts(ago_min * 60),
+                                 "annotations": {"deployment.kubernetes.io/revision": str(revision)},
+                                 "ownerReferences": [{"kind": "Deployment", "name": name}]},
+                    "spec": {"template": {"metadata": {"annotations": ann},
+                                          "spec": {"containers": [{"name": base, "image": img}]}}}}
+        if prev_tag is None:  # a rollout restart: same image, new restartedAt
+            out += [rs("6d8f7c9b5", rev - 1, image, 5 * 24 * 60), rs("7c9d8f6b5", rev, image, mins, ts(mins * 60))]
+        elif prev_tag:
+            out += [rs("6d8f7c9b5", rev - 1, image.rsplit(":", 1)[0] + ":" + prev_tag, 6 * 24 * 60), rs("7d9f6c5b8", rev, image, mins)]
+        else:
+            out.append(rs("7d9f6c5b8", rev, image, mins))
+    return out
+
+
 def workloads(ctx):
     c = CLUSTERS[ctx]
     e = clock(start=True) - c.get("offset", 0)  # fwatch reads these first (baseline)
@@ -209,11 +255,22 @@ def workloads(ctx):
     # the edge proxy is named differently per cluster (krun demo)
     nginx = {"acme-prod-use": "nginx", "acme-prod-euw": "nginx-euw"}.get(ctx, "nginx-edge")
     return [api, dep("web", "web", 4, 30, 4, 4), dep("search", "search", 2, 7, 2, 2),
-            dep("api", "worker", 2, 5, 2, 1), dep("web", nginx, 2, 9, 2, 2)]
+            dep("api", "worker", 2, 5, 2, 1 if ctx == "acme-prod-use" else 2), dep("web", nginx, 2, 9, 2, 2)]
 
 
 # ── pods, services, events, logs ─────────────────────────────────────────
-def pod(ns, name, phase="Running", ready=(1, 1), restarts=0, waiting=None, age_h=26, containers=("app",)):
+# requests/limits and current usage per workload (kreq demo): (cpu req, mem req, mem limit, cpu use, mem use)
+RESOURCES = {
+    "api": ("500m", "512Mi", "1Gi", "180m", "410Mi"),
+    "worker": ("250m", "256Mi", "512Mi", "40m", "190Mi"),
+    "search": ("2", "3Gi", "4Gi", "900m", "3890Mi"),      # near its limit: OOM risk
+    "web": ("1", "2Gi", "2Gi", "15m", "140Mi"),            # reserves far more than it uses
+    "nginx": ("1", "1Gi", "1Gi", "8m", "60Mi"),
+    "prometheus": ("1", "4Gi", "8Gi", "350m", "3100Mi"),
+}
+
+
+def pod(ns, name, phase="Running", ready=(1, 1), restarts=0, waiting=None, age_h=26, containers=("app",), reason=None):
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age_h * 3600))
     statuses = []
     for i, cn in enumerate(containers):
@@ -221,9 +278,18 @@ def pod(ns, name, phase="Running", ready=(1, 1), restarts=0, waiting=None, age_h
         if waiting and i == 0:
             st["state"] = {"waiting": {"reason": waiting}}
         statuses.append(st)
+    res = RESOURCES.get(name.split("-")[0])
+    specs = []
+    for c in containers:
+        spec = {"name": c}
+        if res and c == containers[0]:
+            spec["resources"] = {"requests": {"cpu": res[0], "memory": res[1]}, "limits": {"memory": res[2]}}
+        specs.append(spec)
+    st = {"phase": phase, "containerStatuses": statuses}
+    if reason:
+        st["reason"] = reason
     return {"metadata": {"name": name, "namespace": ns, "creationTimestamp": created},
-            "spec": {"containers": [{"name": c} for c in containers]},
-            "status": {"phase": phase, "containerStatuses": statuses}}
+            "spec": {"containers": specs}, "status": st}
 
 
 # failing pods per cluster (the menu bar demo): use has them all
@@ -244,7 +310,10 @@ def pods(ns, ctx=""):
         pod("web", "web-58c9f7b6d4-2jx8p", age_h=50), pod("web", "web-58c9f7b6d4-7mfkz", age_h=50),
         pod("payments", "payments-api-6f7c8d9b5-kz4lp", ready=(0, 1), waiting="ImagePullBackOff", age_h=1),
         pod("monitoring", "prometheus-0", containers=("prometheus", "config-reloader"), ready=(2, 2), age_h=700),
-        pod("web", "nginx-7c9d8f6b5-k2x4p", age_h=80), pod("web", "nginx-7c9d8f6b5-w8m3q", age_h=80),
+        pod("web", "nginx-7c9d8f6b5-k2x4p", age_h=80), pod("web", "nginx-7c9d8f6b5-w8m4q", age_h=80),
+        # leftovers (kjunk demo)
+        pod("web", "web-58c9f7b6d4-q2wzt", phase="Failed", ready=(0, 1), age_h=50, reason="Evicted"),
+        pod("default", "node-debugger-node-b1-k8x2q", phase="Succeeded", ready=(0, 1), age_h=72, containers=("debugger",)),
     ]
     for p in all_pods:
         if p["metadata"]["name"] in HEALTHY_ON.get(ctx, ()):
@@ -312,7 +381,9 @@ def jobs_and_crons(ns):
             job("search", "reindex-manual-7xk2p", "reindex", 200, 0, "run"),
             job("api", "nightly-sync-29871540", "nightly-sync", 9 * 3600, 250, "ok"),
             job("api", "db-migrate-v2", None, 5 * 3600, 0, "fail", "Job has reached the specified backoff limit"),
-            job("web", "sitemap-29868120", "sitemap", 3 * 86400, 95, "ok")]
+            job("web", "sitemap-29868120", "sitemap", 3 * 86400, 95, "ok"),
+            job("api", "backfill-orders-oct", None, 21 * 86400, 1800, "ok"),
+            job("search", "reindex-catalog-manual", None, 12 * 86400, 900, "ok")]
     keep = lambda o: ns in (None, o["metadata"]["namespace"])
     return [j for j in jobs if keep(j)], [c for c in crons if keep(c)]
 
@@ -355,6 +426,87 @@ def nodes():
     return out
 
 
+GI = 1 << 30
+
+
+def stats_summary(node):
+    """kubelet /stats/summary (kdisk demo): node disk + the PVCs of its pods."""
+    vols = {
+        "node-a1": (0.48, [("db", "postgres-0", "data-postgres-0", 100, 0.91), ("api", "redis-0", "redis-data", 20, 0.22)]),
+        "node-a2": (0.55, [("monitoring", "prometheus-0", "prometheus-db", 200, 0.78)]),
+        "node-b1": (0.86, [("search", "search-6b4f8d7c9-tq9wd", "search-data", 500, 0.64)]),
+    }
+    used, pvcs = vols.get(node, (0.3, []))
+    out = {"node": {"nodeName": node, "fs": {"usedBytes": int(used * 500 * GI), "capacityBytes": 500 * GI}}, "pods": []}
+    for ns, podname, claim, size, pct in pvcs:
+        out["pods"].append({"podRef": {"name": podname, "namespace": ns}, "volume": [
+            {"name": "data", "usedBytes": int(pct * size * GI), "capacityBytes": size * GI,
+             "pvcRef": {"name": claim, "namespace": ns}}]})
+    return out
+
+
+def human_age(created):
+    try:
+        secs = time.time() - time.mktime(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ")) + time.timezone
+    except (TypeError, ValueError):
+        return "1d"
+    if secs >= 2 * 86400:
+        return "%dd" % (secs // 86400)
+    if secs >= 3600:
+        return "%dh" % (secs // 3600)
+    return "%dm" % max(secs // 60, 1)
+
+
+def table(items, kind, all_ns):
+    """What a person sees: kubectl's table instead of JSON."""
+    rows = []
+    if kind == "pods":
+        head = ["NAME", "READY", "STATUS", "RESTARTS", "AGE"]
+        for p in items:
+            st = p["status"]
+            cs = st.get("containerStatuses", [])
+            ready = "%d/%d" % (sum(1 for c in cs if c.get("ready")), len(cs))
+            status = st.get("reason") or next((c["state"]["waiting"]["reason"] for c in cs if c.get("state", {}).get("waiting")), st.get("phase"))
+            if status == "Succeeded":
+                status = "Completed"
+            restarts = str(sum(c.get("restartCount", 0) for c in cs))
+            rows.append([p["metadata"]["namespace"], p["metadata"]["name"], ready, status, restarts, human_age(p["metadata"].get("creationTimestamp"))])
+    elif kind == "deploy":
+        head = ["NAME", "READY", "UP-TO-DATE", "AVAILABLE", "AGE"]
+        for d in items:
+            r, st = d["spec"].get("replicas", 1), d["status"]
+            rows.append([d["metadata"]["namespace"], d["metadata"]["name"], "%d/%d" % (st.get("readyReplicas", 0), r),
+                         str(st.get("updatedReplicas", 0)), str(st.get("availableReplicas", 0)), "%dd" % (40 + len(d["metadata"]["name"]))])
+    elif kind == "nodes":
+        head = ["NAME", "STATUS", "ROLES", "AGE", "VERSION"]
+        for n in items:
+            rows.append(["", n["metadata"]["name"], "Ready", "worker", "120d", n["status"]["nodeInfo"]["kubeletVersion"]])
+        all_ns = False
+    elif kind == "svc":
+        head = ["NAME", "TYPE", "CLUSTER-IP", "PORT(S)", "AGE"]
+        for i, sv in enumerate(items):
+            ports = ",".join("%d/TCP" % pt["port"] for pt in sv["spec"]["ports"])
+            rows.append([sv["metadata"]["namespace"], sv["metadata"]["name"], sv["spec"]["type"], "10.96.%d.%d" % (40 + i, 7 + i * 3), ports, "200d"])
+    if not rows:
+        print("No resources found.")
+        return
+    if all_ns:
+        head = ["NAMESPACE"] + head
+    else:
+        rows = [r[1:] for r in rows]
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(head)]
+    for r in [head] + rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+
+
+def emit(items, kind, flags, ns):
+    out = flags.get("-o", flags.get("--output", ""))
+    if out.startswith("json") or out.startswith("yaml") or out.startswith("jsonpath"):
+        json.dump({"items": items}, sys.stdout)
+    else:
+        table(items, kind, ns is None)
+
+
 def ts(ago):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - ago))
 
@@ -375,7 +527,23 @@ def event(i, ns, kind, name, reason, msg, count, ago=30):
             "count": count, "lastTimestamp": ts(ago)}
 
 
-def events(flags):
+# what Flux did recently, per cluster (kwhat demo): (ns, kind, name, type, reason, message, minutes ago)
+FLUX_HISTORY = {
+    "acme-prod-use": [
+        ("flux-system", "GitRepository", "flux-system", "Normal", "NewArtifact", "stored artifact for commit 'api: release 1.42.0'", 24),
+        ("flux-system", "Kustomization", "apps", "Normal", "Progressing", "Deployment/api/api configured\nDeployment/api/worker configured\nService/api/api unchanged", 23),
+    ],
+    "acme-staging": [
+        ("flux-system", "GitRepository", "flux-system", "Normal", "NewArtifact", "stored artifact for commit 'api: 1.43.0-rc.2 on staging'", 9),
+        ("flux-system", "Kustomization", "apps", "Normal", "Progressing", "Deployment/api/api configured\nDeployment/api/worker configured", 8),
+    ],
+    "acme-prod-euw": [
+        ("search", "HelmRelease", "search", "Normal", "UpgradeSucceeded", "Helm upgrade succeeded for release search/search with chart opensearch@2.15.0", 36),
+    ],
+}
+
+
+def events(flags, ctx=""):
     sel = flags.get("--field-selector", "")
     ns = None if "-A" in flags else flags.get("-n")
     want_name = None
@@ -385,6 +553,11 @@ def events(flags):
     evs = [event(i, *w, ago=40 + i * 25) for i, w in enumerate(WARNINGS)]
     evs.append(event(90, "flux-system", "Kustomization", "apps", "ReconciliationSucceeded",
                      "Reconciliation finished in 4.2s, next run in 5m0s", 1, 50))
+    for i, (ens, kind, name, typ, reason, msg, mins) in enumerate(FLUX_HISTORY.get(ctx, [])):
+        e = event(200 + i, ens, kind, name, reason, msg, 1, mins * 60)
+        e["type"] = typ
+        e["involvedObject"]["namespace"] = ens
+        evs.append(e)
     if want_name:
         evs = [e for e in evs if e["involvedObject"]["name"] == want_name]
     if "type=Warning" in sel:
@@ -425,7 +598,24 @@ LOGS = {
 }
 
 
-def logs(pos, flags):
+def logs(pos, flags, ctx=""):
+    sel = flags.get("-l") or flags.get("--selector")
+    if sel:  # every pod of a workload, interleaved (klogs on a workload)
+        names = [p["metadata"]["name"] for p in select(pods(flags.get("-n"), ctx), sel)
+                 if p["status"]["phase"] == "Running"]
+        if not names:
+            return
+        for i in range(6):
+            print("[pod/%s/app] %s" % (names[i % len(names)], LOGS["default"][i % 4]))
+        if "-f" in flags:
+            sys.stdout.flush()
+            i = 0
+            while True:
+                time.sleep(0.9)
+                print("[pod/%s/app] %s" % (names[i % len(names)], LOGS["default"][(i + 2) % 4]))
+                sys.stdout.flush()
+                i += 1
+        return
     name = pos[1] if len(pos) > 1 else ""
     name = name.split("/", 1)[-1]
     key = ("worker" if name.startswith("worker") else "search" if name.startswith("search")
@@ -511,6 +701,12 @@ Events:
 """
 
 
+NET_SHELL = r"""
+dig() { printf ';; ANSWER SECTION:\n%s.api.svc.cluster.local. 30 IN A 10.96.41.7\n' "${1%%.*}"; }
+curl() { printf '< HTTP/1.1 200 OK\n< content-type: application/json\n\n{"status":"ok","version":"1.42.0"}\n'; }
+nc() { printf 'Connection to %s %s port [tcp/*] succeeded!\n' "$2" "$3"; }
+"""
+
 NODE_SHELL = r"""
 chroot() { shift; "$@"; }
 crictl() {
@@ -546,6 +742,8 @@ def main():
         die("error: You must be logged in to the server (Unauthorized)")
     verb = pos[0] if pos else ""
     ns = None if "-A" in flags else flags.get("-n", flags.get("--namespace"))
+    if ns is None and "-A" not in flags and verb in ("get", "describe", "logs", "top") and "--context" not in flags:
+        ns = pane_namespace()  # like kubectl: the context's namespace (a rex8s pane's)
     out = flags.get("-o", flags.get("--output", ""))
 
     if verb == "auth":
@@ -554,6 +752,10 @@ def main():
         res = pos[1]
         if res.startswith("/api/v1/namespaces/monitoring/services/alertmanager"):
             json.dump(ALERTS, sys.stdout)
+            return
+        m = re.match(r"/api/v1/nodes/([^/]+)/proxy/stats/summary", res)
+        if m:
+            json.dump(stats_summary(m.group(1)), sys.stdout)
             return
         if res.startswith("/api"):
             die("Error from server (NotFound): the server could not find the requested resource")
@@ -566,7 +768,11 @@ def main():
             print("\n".join(NAMESPACES))
         elif "gitrepositories" in res and "kustomizations" not in res:
             objs = [o for o in flux_objects(ctx, start_clock=True) if o["kind"] == "GitRepository"]
-            json.dump({"items": objs}, sys.stdout)
+            if len(pos) > 2:
+                one = [o for o in objs if o["metadata"]["name"] == pos[2]]
+                json.dump(one[0] if one else {}, sys.stdout)
+            else:
+                json.dump({"items": objs}, sys.stdout)
         elif "kustomizations" in res or "helmreleases" in res:
             objs = flux_objects(ctx)
             kinds = set()
@@ -583,23 +789,37 @@ def main():
                 json.dump({"items": objs}, sys.stdout)
         elif res.startswith("deployments"):
             json.dump({"items": workloads(ctx)}, sys.stdout)
+        elif res in ("deploy", "deployment", "deployments.apps") and len(pos) == 2:
+            items = [w for w in workloads(ctx) if ns in (None, w["metadata"]["namespace"])]
+            emit(items, "deploy", flags, ns)
+        elif res in ("replicasets", "rs", "replicaset"):
+            json.dump({"items": replicasets(ctx)}, sys.stdout)
+        elif res in ("controllerrevisions", "controllerrevision"):
+            json.dump({"items": []}, sys.stdout)
         elif res in ("deployment", "statefulset", "daemonset") and len(pos) > 2:
             one = [w for w in workloads(ctx) if w["metadata"]["name"] == pos[2]]
             if not one:
                 die('Error from server (NotFound): %ss.apps "%s" not found' % (res, pos[2]))
             json.dump(one[0], sys.stdout)
         elif res in ("pods", "pod", "po"):
-            json.dump({"items": select(pods(ns, ctx), flags.get("-l") or flags.get("--selector"))}, sys.stdout)
+            emit(select(pods(ns, ctx), flags.get("-l") or flags.get("--selector")), "pods", flags, ns)
         elif res in ("services", "svc", "service"):
-            json.dump({"items": services(ns)}, sys.stdout)
+            emit(services(ns), "svc", flags, ns)
         elif res in ("jobs", "job", "jobs.batch"):
             json.dump({"items": jobs_and_crons(ns)[0]}, sys.stdout)
         elif res in ("cronjobs", "cronjob", "cj", "cronjobs.batch"):
             json.dump({"items": jobs_and_crons(ns)[1]}, sys.stdout)
+        elif res in ("pv", "persistentvolumes", "persistentvolume"):
+            json.dump({"items": [
+                {"metadata": {"name": "pvc-3f1c9a2e-orders-old", "creationTimestamp": ts(200 * 86400)},
+                 "spec": {"persistentVolumeReclaimPolicy": "Retain", "capacity": {"storage": "50Gi"},
+                          "claimRef": {"namespace": "api", "name": "orders-db-old"}}, "status": {"phase": "Released"}},
+                {"metadata": {"name": "pvc-8d2e7b10-postgres", "creationTimestamp": ts(300 * 86400)},
+                 "spec": {"capacity": {"storage": "100Gi"}}, "status": {"phase": "Bound"}}]}, sys.stdout)
         elif res in ("nodes", "node", "no"):
-            json.dump({"items": nodes()}, sys.stdout)
+            emit(nodes(), "nodes", flags, ns)
         elif res in ("events", "ev"):
-            evs = events(flags)
+            evs = events(flags, ctx)
             if "-w" in flags or "--watch" in flags:
                 for e in evs:
                     print(json.dumps(e, indent=4))
@@ -624,6 +844,15 @@ def main():
         name = pos[2] if len(pos) > 2 else "pod"
         app = name.split("-")[0]
         print(DESCRIBE.format(name=name, ns=ns or "api", app=app, rs="-".join(name.split("-")[:2])))
+    elif verb == "top" and len(pos) > 1 and pos[1] in ("pods", "pod", "po"):
+        for p in pods(ns, ctx):
+            r = RESOURCES.get(p["metadata"]["name"].split("-")[0])
+            if p["status"]["phase"] != "Running":
+                continue
+            cpu, mem = (r[3], r[4]) if r else ("3m", "24Mi")
+            c = p["spec"]["containers"][0]["name"]
+            cols = ([p["metadata"]["namespace"]] if ns is None else []) + [p["metadata"]["name"], c, cpu, mem]
+            print("   ".join(cols))
     elif verb == "top" and len(pos) > 1 and pos[1] in ("nodes", "node", "no"):
         for name, cpu, mem in NODES:
             print("%s   %dm   %d%%   %dMi   %d%%" % (name, int(cpu * 15800), int(cpu * 100), int(mem * 63488), int(mem * 100)))
@@ -632,7 +861,7 @@ def main():
     elif verb == "delete" and len(pos) > 2:
         print('%s.batch "%s" deleted' % (pos[1], pos[2]))
     elif verb == "logs":
-        logs(pos, flags)
+        logs(pos, flags, ctx)
     elif verb == "annotate":
         for a in pos:
             if a.startswith("reconcile.fluxcd.io/requestedAt="):
@@ -643,6 +872,12 @@ def main():
         kind, _, name = pos[2].partition("/")
         open(os.path.join(STATE, "restart-%s-%s" % (ctx, name)), "w").write(str(time.time()))
         print("%s.apps/%s restarted" % (kind, name))
+    elif verb == "run" and len(pos) > 1:
+        print("If you don't see a command prompt, try pressing enter.")
+        sys.stdout.flush()
+        env_file = os.path.join(STATE, "net-env.sh")
+        open(env_file, "w").write(NET_SHELL)
+        os.execvpe("/bin/sh", ["/bin/sh", "-i"], dict(os.environ, PS1="%s:~# " % pos[1], ENV=env_file))
     elif verb == "debug" and len(pos) > 1 and pos[1].startswith("node/"):
         node = pos[1].split("/", 1)[1]
         print("Creating debugging pod node-debugger-%s-x7k2p with container debugger on node %s." % (node, node))

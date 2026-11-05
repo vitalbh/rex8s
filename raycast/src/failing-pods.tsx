@@ -17,7 +17,7 @@ function podSubtitle(p: Pod) {
 }
 
 export default function Command() {
-  const { data, isLoading, revalidate } = useCachedPromise(() => list<ClusterFailing[]>("failing"), [], {
+  const { data, isLoading, revalidate } = useCachedPromise(() => list<ClusterFailing[]>("failing", "--notify"), [], {
     keepPreviousData: true,
   });
   const clusters = data ?? [];

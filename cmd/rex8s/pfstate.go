@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -111,6 +112,7 @@ func (a *app) kpfList() error {
 	act, err := tui.Run(tui.Options{Title: fmt.Sprintf("%s/%s on %s → %s", e.Namespace, e.Service, e.Short, e.URL()), Items: []tui.Item{
 		{Key: "open", Label: fmt.Sprintf("%-6s", "open"), Hint: "open " + e.URL() + " in the browser"},
 		{Key: "copy", Label: fmt.Sprintf("%-6s", "copy"), Hint: "copy " + e.URL()},
+		{Key: "save", Label: fmt.Sprintf("%-6s", "save"), Hint: "save as a favorite (kpf NAME starts it again, also in Raycast)"},
 		{Key: "stop", Label: fmt.Sprintf("%-6s", "stop"), Hint: "stop it (its pane closes)"},
 	}})
 	if err != nil || act == nil {
@@ -126,6 +128,19 @@ func (a *app) kpfList() error {
 			return err
 		}
 		fmt.Println("copied " + e.URL())
+	case "save":
+		fmt.Fprint(os.Stderr, tui.Bold.Render("Favorite name")+tui.Dim.Render(" (enter: "+e.Service+")")+"\n  > ")
+		name := ""
+		if tty, err := os.Open("/dev/tty"); err == nil {
+			line, _ := bufio.NewReader(tty).ReadString('\n')
+			tty.Close()
+			name = strings.TrimSpace(line)
+		}
+		saved, err := a.saveFavorite(e, name)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("saved %s · %s\n", tui.Bold.Render(saved), tui.Dim.Render("kpf "+saved+" starts it and opens the browser"))
 	case "stop":
 		if err := a.pfStop(e.PID); err != nil {
 			return err

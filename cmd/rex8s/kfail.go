@@ -64,7 +64,7 @@ func (a *app) kfail(args []string) error {
 		ns = "default"
 	}
 	scope, where := []string{"-A"}, c.Short
-	if !allNS {
+	if !allNS && !c.AllNS {
 		scope, where = []string{"-n", ns}, c.Short+"/"+ns
 	}
 
@@ -108,6 +108,7 @@ func (a *app) kfail(args []string) error {
 	actions := []tui.Item{
 		{Key: "logs", Label: fmt.Sprintf("%-9s", "logs"), Hint: "follow the logs in a split"},
 		{Key: "why", Label: fmt.Sprintf("%-9s", "why"), Hint: "ask Claude why it is unhealthy (kwhy)"},
+		{Key: "ask", Label: fmt.Sprintf("%-9s", "ask"), Hint: "talk to Claude about it, with read-only kubectl (kask)"},
 		{Key: "shell", Label: fmt.Sprintf("%-9s", "shell"), Hint: "open a shell in it in a split (kexec)"},
 		{Key: "describe", Label: fmt.Sprintf("%-9s", "describe"), Hint: "kubectl describe"},
 		{Key: "events", Label: fmt.Sprintf("%-9s", "events"), Hint: "all events of the pod"},
@@ -124,12 +125,15 @@ func (a *app) kfail(args []string) error {
 		if err != nil || !ok {
 			return err
 		}
-		verb, tail := "logtail", a.logtail
+		verb := "logtail"
 		if act.Key == "shell" {
-			verb, tail = "exectail", a.exectail
+			verb = "exectail"
 		}
 		if !inRex {
-			return tail(c.Name, p.Namespace, p.Name, container)
+			if act.Key == "shell" {
+				return a.exectail(c.Name, p.Namespace, p.Name, container)
+			}
+			return a.logtail(c.Name, p.Namespace, p.Name, container, logOpts{})
 		}
 		argv := []string{self, verb, c.Name, p.Namespace, p.Name}
 		if container != "" {
@@ -139,6 +143,9 @@ func (a *app) kfail(args []string) error {
 		if act.Key == "shell" {
 			label = "exec "
 		}
+		if act.Key == "logs" {
+			return rex.SplitBehind(label+p.Name, argv...)
+		}
 		return rex.Split(label+p.Name, argv...)
 	case "why":
 		if _, err := a.aiCommand(); err != nil {
@@ -147,7 +154,12 @@ func (a *app) kfail(args []string) error {
 		if !inRex {
 			return a.whytail(c.Name, p.Namespace, p.Name)
 		}
-		return rex.Split("why "+p.Name, self, "whytail", c.Name, p.Namespace, p.Name)
+		return rex.SplitBehind("why "+p.Name, self, "whytail", c.Name, p.Namespace, p.Name)
+	case "ask":
+		if !inRex {
+			return a.askpod(c.Name, p.Namespace, p.Name)
+		}
+		return rex.Split("ask "+p.Name, self, "askpod", c.Name, p.Namespace, p.Name)
 	case "describe":
 		defer pause()
 		return a.runKubectl(false, "--context", c.Name, "-n", p.Namespace, "describe", "pod", p.Name)

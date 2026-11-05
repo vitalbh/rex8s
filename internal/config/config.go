@@ -23,6 +23,17 @@ type Cluster struct {
 	Login string `json:"login"` // login page for kauth (overrides login_url)
 }
 
+// Forward is a favorite port-forward.
+type Forward struct {
+	Name      string `json:"name"`
+	Cluster   string `json:"cluster"` // short name or context
+	Namespace string `json:"namespace"`
+	Service   string `json:"service"`
+	Port      int    `json:"port"`  // the service port
+	Local     int    `json:"local"` // preferred local port (default: same as port)
+	Path      string `json:"path"`  // opened in the browser, e.g. /dashboards
+}
+
 type Config struct {
 	Kubeconfig string    `json:"kubeconfig"`
 	Hide       []string  `json:"hide"`
@@ -38,6 +49,8 @@ type Config struct {
 	// AICommand runs kwhy's explanation: "claude" by default (claude-auto
 	// when present); "off" disables kwhy.
 	AICommand string `json:"ai_command"`
+	// AskAgent is the agent kask talks through: claude (default) or codex.
+	AskAgent string `json:"ask_agent"`
 	// AILanguage is the language kwhy answers in, e.g. "pt-BR". Default: English.
 	AILanguage string `json:"ai_language"`
 	// Notifications: macOS notifications from fwatch and the Flux monitor.
@@ -45,6 +58,16 @@ type Config struct {
 	Notifications *bool `json:"notifications"`
 	// NodeDebugImage is the image knode runs on the node. Default busybox.
 	NodeDebugImage string `json:"node_debug_image"`
+	// GitopsRepos are local clones of the Flux GitOps repositories, for kgit
+	// (matched by remote URL). The current directory's repository is tried too.
+	GitopsRepos []string `json:"gitops_repos"`
+	// Groups name sets of clusters for kmulti, e.g. prod: [dal, sp, mx].
+	Groups map[string][]string `json:"groups"`
+	// Forwards are favorite port-forwards: kpf NAME (and the Raycast menu
+	// bar) starts one and opens the browser.
+	Forwards []Forward `json:"forwards"`
+	// NetDebugImage is the image knet runs in the namespace. Default netshoot.
+	NetDebugImage string `json:"net_debug_image"`
 
 	path string
 }
@@ -81,6 +104,15 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) File() string { return c.path }
+
+// GitopsDirs returns gitops_repos with ~ expanded.
+func (c *Config) GitopsDirs() []string {
+	out := make([]string, 0, len(c.GitopsRepos))
+	for _, d := range c.GitopsRepos {
+		out = append(out, expand(d))
+	}
+	return out
+}
 
 // KubeconfigPath is the "master" kubeconfig that panes are derived from.
 func (c *Config) KubeconfigPath() string {

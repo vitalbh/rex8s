@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vitalbh/rex8s/internal/kube"
@@ -131,27 +131,6 @@ func age(t time.Time) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
-// klogs: pick a pod in the current namespace and follow its logs in a pane
-// next to this one.
-func (a *app) klogs(filter string) error {
-	sel, err := a.pickPod("Logs", filter)
-	if err != nil || sel == nil {
-		return err
-	}
-	container, ok, err := pickContainer(sel.pod, true)
-	if err != nil || !ok {
-		return err
-	}
-	if rex.Block() == "" {
-		return a.logtail(sel.ctx.Name, sel.ns, sel.pod.Name, container)
-	}
-	argv := []string{filepath.Join(a.binDir, "rex8s"), "logtail", sel.ctx.Name, sel.ns, sel.pod.Name}
-	if container != "" {
-		argv = append(argv, container)
-	}
-	return rex.Split("logs "+sel.pod.Name, argv...)
-}
-
 // podSelection is a pod picked in the current pane's cluster/namespace.
 type podSelection struct {
 	ctx kube.Context
@@ -174,12 +153,16 @@ func (a *app) pickPod(verb, filter string) (*podSelection, error) {
 	if err != nil {
 		return nil, err
 	}
+	scope, where := []string{"-n", ns}, c.Short+"/"+ns
+	if c.AllNS {
+		scope, where = []string{"-A"}, c.Short+" (all namespaces)"
+	}
 	pods := map[string]pod{}
 	it, err := tui.Run(tui.Options{
-		Title: fmt.Sprintf("%s · pods in %s/%s", verb, c.Short, ns),
+		Title: fmt.Sprintf("%s · pods in %s", verb, where),
 		Query: filter,
 		Load: func() ([]tui.Item, error) {
-			out, err := cl.Get(c.Name, "get", "pods", "-n", ns, "-o", "json")
+			out, err := cl.Get(c.Name, append([]string{"get", "pods", "-o", "json"}, scope...)...)
 			if err != nil {
 				return nil, err
 			}
@@ -188,19 +171,25 @@ func (a *app) pickPod(verb, filter string) (*podSelection, error) {
 				return nil, err
 			}
 			if len(ps) == 0 {
-				return nil, fmt.Errorf("no pods in %s", ns)
+				return nil, fmt.Errorf("no pods in %s", where)
 			}
 			rank := map[string]int{"FAIL": 0, "WAIT": 1, "ok": 2, "done": 3}
 			sort.SliceStable(ps, func(i, j int) bool { return rank[ps[i].badge()] < rank[ps[j].badge()] })
 			w := 0
+			name := func(p pod) string {
+				if c.AllNS {
+					return p.Namespace + "/" + p.Name
+				}
+				return p.Name
+			}
 			for _, p := range ps {
-				w = max(w, len(p.Name))
+				w = max(w, len(name(p)))
 			}
 			items := make([]tui.Item, 0, len(ps))
 			for _, p := range ps {
-				pods[p.Name] = p
+				pods[name(p)] = p
 				hint := fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.status(), p.Ready, p.Total, p.Restarts, age(p.Created))
-				items = append(items, tui.Item{Key: p.Name, Label: fmt.Sprintf("%-*s", w, p.Name), Hint: hint, Badge: p.badge()})
+				items = append(items, tui.Item{Key: name(p), Label: fmt.Sprintf("%-*s", w, name(p)), Hint: hint, Badge: p.badge()})
 			}
 			return items, nil
 		},
@@ -208,7 +197,8 @@ func (a *app) pickPod(verb, filter string) (*podSelection, error) {
 	if err != nil || it == nil {
 		return nil, err
 	}
-	return &podSelection{ctx: c, ns: ns, pod: pods[it.Key], cl: cl}, nil
+	sel := pods[it.Key]
+	return &podSelection{ctx: c, ns: sel.Namespace, pod: sel, cl: cl}, nil
 }
 
 // pickContainer asks which container when the pod has several. allowAll adds
@@ -232,18 +222,32 @@ func pickContainer(p pod, allowAll bool) (string, bool, error) {
 }
 
 // logtail follows a pod's logs (runs in its own pane).
-func (a *app) logtail(ctxName, ns, podName, container string) error {
+func (a *app) logtail(ctxName, ns, podName, container string, lo logOpts) error {
+	re, err := lo.compile()
+	if err != nil {
+		return err
+	}
 	c, err := a.context(ctxName)
 	if err != nil {
 		return err
 	}
 	rex.Rename("logs " + c.Short + "/" + podName)
+	if d := lo.describe(); d != "" {
+		fmt.Println(tui.Dim.Render(strings.TrimPrefix(d, " · ")))
+	}
 	a.tint(c)
 	bin, err := a.kubectl()
 	if err != nil {
 		return err
 	}
-	args := []string{"--context", ctxName, "-n", ns, "logs", "-f", "--tail=300", podName}
+	window := "--tail=300"
+	switch {
+	case lo.since != "":
+		window = "--since=" + lo.since
+	case re != nil:
+		window = "--tail=3000" // grep: look further back
+	}
+	args := []string{"--context", ctxName, "-n", ns, "logs", "-f", window, podName}
 	switch container {
 	case "":
 	case "*":
@@ -252,9 +256,16 @@ func (a *app) logtail(ctxName, ns, podName, container string) error {
 		args = append(args, "-c", container)
 	}
 	cmd := exec.Command(bin, args...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	cmd.Stderr = os.Stderr
 	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-	_ = cmd.Run()
+	if re == nil {
+		cmd.Stdout = os.Stdout
+		_ = cmd.Run()
+	} else if pipe, err := cmd.StdoutPipe(); err == nil && cmd.Start() == nil {
+		var mu sync.Mutex
+		copyLines(pipe, "", &mu, re)
+		_ = cmd.Wait()
+	}
 	fmt.Fprint(os.Stderr, tui.Dim.Render("\nlogs ended · press enter to close"))
 	bufio.NewReader(os.Stdin).ReadString('\n')
 	return nil

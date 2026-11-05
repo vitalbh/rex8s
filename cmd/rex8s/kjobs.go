@@ -23,6 +23,7 @@ type job struct {
 
 type cronJob struct {
 	Namespace, Name, Schedule string
+	TimeZone                  string // spec.timeZone ("" = the controller's, usually UTC)
 	Suspend                   bool
 	LastRun, LastOK           time.Time
 }
@@ -103,6 +104,7 @@ func parseCronJobs(data []byte) ([]cronJob, error) {
 			} `json:"metadata"`
 			Spec struct {
 				Schedule string `json:"schedule"`
+				TimeZone string `json:"timeZone"`
 				Suspend  bool   `json:"suspend"`
 			} `json:"spec"`
 			Status struct {
@@ -116,7 +118,7 @@ func parseCronJobs(data []byte) ([]cronJob, error) {
 	}
 	out := make([]cronJob, 0, len(list.Items))
 	for _, it := range list.Items {
-		c := cronJob{Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Schedule: it.Spec.Schedule, Suspend: it.Spec.Suspend}
+		c := cronJob{Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Schedule: it.Spec.Schedule, TimeZone: it.Spec.TimeZone, Suspend: it.Spec.Suspend}
 		if t := it.Status.LastScheduleTime; t != nil {
 			c.LastRun = *t
 		}
@@ -244,7 +246,7 @@ func (a *app) kjobs(args []string) error {
 		ns = "default"
 	}
 	scope, where := []string{"-A"}, c.Short
-	if !allNS {
+	if !allNS && !c.AllNS {
 		scope, where = []string{"-n", ns}, c.Short+"/"+ns
 	}
 
@@ -447,9 +449,9 @@ func (a *app) jobAction(c kube.Context, cl kube.Client, j job) error {
 	switch act.Key {
 	case "logs":
 		if rex.Block() == "" {
-			return a.logtail(c.Name, j.Namespace, "job/"+j.Name, "")
+			return a.logtail(c.Name, j.Namespace, "job/"+j.Name, "", logOpts{})
 		}
-		return rex.Split("logs "+j.Name, filepath.Join(a.binDir, "rex8s"), "logtail", c.Name, j.Namespace, "job/"+j.Name)
+		return rex.SplitBehind("logs "+j.Name, filepath.Join(a.binDir, "rex8s"), "logtail", c.Name, j.Namespace, "job/"+j.Name)
 	case "describe":
 		return a.runKubectl(false, "--context", c.Name, "-n", j.Namespace, "describe", "job", j.Name)
 	case "events":

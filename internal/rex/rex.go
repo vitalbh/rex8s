@@ -137,9 +137,19 @@ func themeSeq(background string) string {
 	return "\x1b]11;" + background + "\x07"
 }
 
-// Split opens a new pane next to the current one running argv.
-func Split(label string, argv ...string) error {
+// Split opens a new pane next to the current one running argv, and focuses
+// it (for things you type in: a shell, a conversation, an editor).
+func Split(label string, argv ...string) error { return split(true, label, argv...) }
+
+// SplitBehind opens the pane but keeps the focus where it is (for things you
+// only watch: logs, a port-forward, an answer), so you keep typing here.
+func SplitBehind(label string, argv ...string) error { return split(false, label, argv...) }
+
+func split(focus bool, label string, argv ...string) error {
 	args := []string{"split", "--shell=none", "--label", label}
+	if !focus {
+		args = append(args, "--focus=false")
+	}
 	if b := Block(); b != "" {
 		args = append(args, "-b", b)
 	}

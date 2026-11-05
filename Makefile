@@ -9,8 +9,9 @@ build:
 test:
 	go vet ./... && go test ./...
 
-# install the binaries and (re)generate the wrappers that panes put on PATH
+# install the binaries, the k* commands, rex8s.lua and require("rex8s"),
+# then reload Rex (rex8s setup does all but the copy)
 install: test build
 	mkdir -p $(BIN_DIR)
 	install -m 0755 bin/rex8s bin/rex8s-guard $(BIN_DIR)/
-	./scripts/wrappers.sh $(BIN_DIR)
+	$(BIN_DIR)/rex8s setup

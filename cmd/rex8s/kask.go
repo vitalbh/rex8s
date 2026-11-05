@@ -125,17 +125,30 @@ func nsOr(ns string) string {
 	return ns
 }
 
-// claudeBin is plain `claude`: kask needs its permission prompts, so wrappers
-// that skip them (ai_command, claude-auto) are not used.
+// askAgent: claude or codex (config ask_agent; default claude, else codex
+// when only it is installed).
+func (a *app) askAgent() string {
+	if ag := strings.ToLower(strings.TrimSpace(a.cfg.AskAgent)); ag == "codex" || ag == "claude" {
+		return ag
+	}
+	if pathx.Real("claude", a.binDir) == "" && pathx.Real("codex", a.binDir) != "" {
+		return "codex"
+	}
+	return "claude"
+}
+
+// claudeBin is the agent kask runs — plain claude or codex: kask needs their
+// permission prompts, so wrappers that skip them (claude-auto) are not used.
 func (a *app) claudeBin() (string, error) {
 	switch strings.ToLower(strings.TrimSpace(a.cfg.AICommand)) {
 	case "off", "none", "false":
-		return "", errors.New("Claude is disabled (ai_command: off in " + a.cfg.File() + ")")
+		return "", errors.New("AI is disabled (ai_command: off in " + a.cfg.File() + ")")
 	}
-	if p := pathx.Real("claude", a.binDir); p != "" {
+	ag := a.askAgent()
+	if p := pathx.Real(ag, a.binDir); p != "" {
 		return p, nil
 	}
-	return "", errors.New("claude CLI not found in PATH")
+	return "", errors.New(ag + " CLI not found in PATH (config ask_agent picks claude or codex)")
 }
 
 func (a *app) dumpDir() string { return filepath.Join(a.cache, "dumps") }
@@ -207,9 +220,18 @@ func (a *app) asktail(ctxName, ns, file string) error {
 	prompt := fmt.Sprintf("%s has the context I collected from cluster %s (namespace %s).%s Read it and tell me what is wrong and how to fix it; "+
 		"run read-only kubectl to dig further when the file isn't enough.", filepath.Base(file), c.Short, ns, prod)
 
-	args := []string{"--append-system-prompt", system, "--allowedTools"}
-	args = append(args, askAllowed...)
-	args = append(args, "--", prompt)
+	var args []string
+	if a.askAgent() == "codex" {
+		// Codex: no system-prompt flag, the instructions go first in the
+		// prompt. It asks before running commands (kubectl included); the
+		// guard still refuses production changes without REX8S_FORCE=1.
+		args = []string{"-C", filepath.Dir(file), "-s", "danger-full-access", "-a", "untrusted",
+			system + "\n\n" + prompt}
+	} else {
+		args = []string{"--append-system-prompt", system, "--allowedTools"}
+		args = append(args, askAllowed...)
+		args = append(args, "--", prompt)
+	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = filepath.Dir(file)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
@@ -227,6 +249,27 @@ func (a *app) asktail(ctxName, ns, file string) error {
 		bufio.NewReader(os.Stdin).ReadString('\n')
 	}
 	return nil
+}
+
+// askpod gathers one pod's context and opens the conversation in this pane
+// (kfail's "ask" and the Raycast action use it).
+func (a *app) askpod(ctxName, ns, podName string) error {
+	c, err := a.context(ctxName)
+	if err != nil {
+		return err
+	}
+	cl, err := a.client(a.src)
+	if err != nil {
+		return err
+	}
+	cl.Timeout = 20 * time.Second
+	fmt.Fprint(os.Stderr, tui.Dim.Render("gathering describe, events and logs… "))
+	file, err := a.writeDump(c, "pod "+podName, gatherPod(cl, ctxName, ns, podName))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, tui.Dim.Render(tildePath(file)))
+	return a.asktail(ctxName, ns, file)
 }
 
 // pickAskTarget: the picker — first row the whole cluster, then every pod

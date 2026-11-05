@@ -78,6 +78,12 @@ export default function Command() {
                   onAction={() => open("k8s_why", { ctx, ns: p.namespace, pod: p.name }, `Asking Claude about ${p.name}…`)}
                 />
                 <Action
+                  title="Ask Claude (Conversation)"
+                  icon={Icon.SpeechBubble}
+                  shortcut={{ modifiers: ["cmd", "shift"], key: "e" }}
+                  onAction={() => open("k8s_ask", { ctx, ns: p.namespace, pod: p.name }, `Opening Claude on ${p.name}…`)}
+                />
+                <Action
                   title="Shell into Container"
                   icon={Icon.Terminal}
                   shortcut={{ modifiers: ["cmd"], key: "s" }}

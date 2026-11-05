@@ -32,7 +32,7 @@ func (a *app) kwarn(args []string) error {
 		return err
 	}
 	ns := ""
-	if *nsOnly {
+	if *nsOnly && !c.AllNS {
 		ns = c.Namespace
 		if ns == "" {
 			ns = "default"
@@ -44,6 +44,9 @@ func (a *app) kwarn(args []string) error {
 // warnings streams Warning events of ctxName (ns "" = all namespaces). It is
 // also the bottom pane of the k9s layout.
 func (a *app) warnings(ctxName, ns string) error {
+	if ns == kube.AllNamespaces {
+		ns = ""
+	}
 	c, err := a.context(ctxName)
 	if err != nil {
 		return err

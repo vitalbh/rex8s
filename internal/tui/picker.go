@@ -374,6 +374,16 @@ func (m model) renderList(width int) string {
 	return lipgloss.NewStyle().Width(width).Height(h).MaxWidth(width).Render(strings.Join(rows, "\n"))
 }
 
+// hasBadges: some item shows a badge, so badge-less rows get its width.
+func (m model) hasBadges() bool {
+	for _, it := range m.items {
+		if it.Badge != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (m model) renderRow(mt match, selected bool, width int) string {
 	it := m.items[mt.idx]
 	cur := "  "
@@ -389,6 +399,9 @@ func (m model) renderRow(mt match, selected bool, width int) string {
 	case "SUSP", "WAIT":
 		tag = Warn.Render(padRight(it.Badge, 4)) + " "
 	case "":
+		if m.hasBadges() { // keep the columns aligned with the rows that have one
+			tag = "     "
+		}
 	default:
 		tag = devTag.Render(padRight(it.Badge, 4)) + " "
 	}

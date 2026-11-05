@@ -15,8 +15,8 @@ import (
 )
 
 // Run executes tool (kubectl/helm/flux), asking for confirmation when the
-// command mutates a production cluster. Without a TTY, or with REX8S_FORCE,
-// it just passes through.
+// command mutates a production cluster. Without a TTY (agents, scripts) such
+// a command is refused; REX8S_FORCE=1 lets it through.
 //
 // It lives outside the TUI binary on purpose: Bubble Tea's init() queries the
 // terminal background color and can block for up to 5s on terminals that
@@ -28,12 +28,24 @@ func Run(tool string, args []string, skipDir string, cfg *config.Config) error {
 	}
 	run := func() error { return syscall.Exec(bin, append([]string{tool}, args...), os.Environ()) }
 
-	// REX8S_AGENT: an agent (kask's Claude) runs the command — no terminal,
-	// but production changes must not pass silently.
-	agent := os.Getenv("REX8S_AGENT") != ""
-	if os.Getenv("REX8S_FORCE") != "" || (!agent && !term.IsTerminal(int(os.Stdin.Fd()))) {
+	// a pane showing every namespace: reads get -A, the rest needs -n
+	if p0 := Parse(args); true {
+		if c, err := kube.Current(cfg, p0.Context, p0.Kubeconfig); err == nil && c.AllNS {
+			adapted, msg := AllNamespacesArgs(tool, p0, args)
+			if msg != "" {
+				fmt.Fprintln(os.Stderr, "rex8s: "+msg)
+				os.Exit(1)
+			}
+			args = adapted
+		}
+	}
+	if os.Getenv("REX8S_FORCE") != "" {
 		return run()
 	}
+	// Nobody at a terminal to confirm: an agent (Claude Code sets CLAUDECODE,
+	// kask sets REX8S_AGENT; Codex, Cursor and scripts have no TTY). A change
+	// to production is refused instead of passing silently.
+	unattended := os.Getenv("REX8S_AGENT") != "" || os.Getenv("CLAUDECODE") == "1" || !term.IsTerminal(int(os.Stdin.Fd()))
 	p := Parse(args)
 	if !Risky(tool, p) {
 		return run()
@@ -42,9 +54,10 @@ func Run(tool string, args []string, skipDir string, cfg *config.Config) error {
 	if err != nil || !c.Prod {
 		return run()
 	}
-	if agent {
-		fmt.Fprintf(os.Stderr, "rex8s guard: refused: %s %s would change the PRODUCTION cluster %s.\n"+
-			"Ask the user first. Only if they agree to this exact change, run it again prefixed with REX8S_FORCE=1.\n",
+	if unattended {
+		fmt.Fprintf(os.Stderr, "rex8s guard: refused: %s %s would change the PRODUCTION cluster %s, and there is no terminal to confirm it.\n"+
+			"An agent: ask the user first; only if they agree to this exact change, run it again prefixed with REX8S_FORCE=1.\n"+
+			"A script: prefix it with REX8S_FORCE=1.\n",
 			tool, strings.Join(args, " "), c.Short)
 		os.Exit(1)
 	}

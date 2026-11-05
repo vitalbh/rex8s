@@ -32,6 +32,13 @@
       "mode": "view"
     },
     {
+      "name": "search-workloads",
+      "title": "Search Workloads",
+      "subtitle": "rex8s",
+      "description": "Workloads of every cluster with their versions: follow or search the logs of all pods, restart.",
+      "mode": "view"
+    },
+    {
       "name": "flux-status",
       "title": "Flux Status",
       "subtitle": "rex8s",
@@ -44,6 +51,14 @@
       "title": "Failing Pods",
       "subtitle": "rex8s",
       "description": "Failing pods of every cluster in the menu bar; opens kfail in Rex.",
+      "mode": "menu-bar",
+      "interval": "2m"
+    },
+    {
+      "name": "alerts",
+      "title": "Alerts",
+      "subtitle": "rex8s",
+      "description": "Firing alerts (Alertmanager or Prometheus in each cluster) in the menu bar; notifies new critical ones.",
       "mode": "menu-bar",
       "interval": "2m"
     },
@@ -79,6 +94,14 @@
       "type": "textfield",
       "required": false,
       "default": "Rex Beta"
+    },
+    {
+      "name": "rexSession",
+      "title": "Rex session",
+      "description": "Session (label or ID) where Raycast opens Rex tabs. Created when missing.",
+      "type": "textfield",
+      "required": false,
+      "default": "k8s"
     }
   ],
   "dependencies": {

@@ -30,6 +30,7 @@ type Context struct {
 	Namespace string
 	Short     string
 	Prod      bool
+	AllNS     bool // the pane shows every namespace (namespace "*")
 }
 
 func Load(path string) (*api.Config, error) { return clientcmd.LoadFromFile(path) }
@@ -61,8 +62,15 @@ func Find(raw *api.Config, cfg *config.Config, name string) (Context, bool) {
 	return describe(raw, cfg, name, c), true
 }
 
+// AllNamespaces is the namespace a pane uses for "every namespace": kubectl
+// (through the guard) gets -A, the k* commands list every namespace.
+const AllNamespaces = "*"
+
 func describe(raw *api.Config, cfg *config.Config, name string, c *api.Context) Context {
 	ctx := Context{Name: name, Cluster: c.Cluster, User: c.AuthInfo, Namespace: c.Namespace}
+	if ctx.Namespace == AllNamespaces {
+		ctx.Namespace, ctx.AllNS = "", true
+	}
 	if cl := raw.Clusters[c.Cluster]; cl != nil {
 		ctx.Server = cl.Server
 	}

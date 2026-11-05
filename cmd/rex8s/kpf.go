@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -95,15 +96,43 @@ func freePort(want int) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// kpf: pick a service (and port) in the current namespace and port-forward
-// it in a pane next to this one. kpf -l lists the running ones; kpf --stop
+// kpf: pick a service (and port) — every namespace, this pane's first; -n
+// only this namespace — and port-forward it in a pane next to this one. kpf -l lists the running ones; kpf --stop
 // PID stops one (for Raycast).
 func (a *app) kpf(args []string) error {
-	filter := ""
+	filter, onlyNS := "", false
+	if len(args) > 0 && args[0] == "-n" {
+		onlyNS, args = true, args[1:]
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "-l", "ls", "list":
 			return a.kpfList()
+		case "-f", "fav", "favorites":
+			return a.kpfFavorites()
+		case "--save": // kpf --save PID [NAME] (Raycast)
+			if len(args) < 2 {
+				return errors.New("kpf --save PID [NAME]")
+			}
+			pid, err := strconv.Atoi(args[1])
+			if err != nil {
+				return fmt.Errorf("bad pid %q", args[1])
+			}
+			name := ""
+			if len(args) > 2 {
+				name = args[2]
+			}
+			for _, e := range a.pfList() {
+				if e.PID == pid {
+					saved, err := a.saveFavorite(e, name)
+					if err != nil {
+						return err
+					}
+					fmt.Println(saved)
+					return nil
+				}
+			}
+			return fmt.Errorf("no port-forward with pid %d", pid)
 		case "--stop":
 			if len(args) < 2 {
 				return errors.New("kpf --stop PID")
@@ -114,27 +143,31 @@ func (a *app) kpf(args []string) error {
 			}
 			return a.pfStop(pid)
 		}
+		if f, ok := a.favorite(args[0]); ok {
+			return a.kpfFavorite(f)
+		}
 		filter = args[0]
 	}
 	c, err := kube.Current(a.cfg, "", "")
 	if err != nil {
 		return err
 	}
-	ns := c.Namespace
-	if ns == "" {
-		ns = "default"
-	}
+	here := nsOr(c.Namespace)
 	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
+	scope, where := []string{"-A"}, c.Short+" (all namespaces, "+here+" first)"
+	if onlyNS {
+		scope, where = []string{"-n", here}, c.Short+"/"+here
+	}
 
 	svcs := map[string]service{}
 	it, err := tui.Run(tui.Options{
-		Title: fmt.Sprintf("Port-forward · services in %s/%s", c.Short, ns),
+		Title: "Port-forward · services in " + where,
 		Query: filter,
 		Load: func() ([]tui.Item, error) {
-			out, err := cl.Get(c.Name, "get", "services", "-n", ns, "-o", "json")
+			out, err := cl.Get(c.Name, append([]string{"get", "services", "-o", "json"}, scope...)...)
 			if err != nil {
 				return nil, err
 			}
@@ -143,16 +176,27 @@ func (a *app) kpf(args []string) error {
 				return nil, err
 			}
 			if len(ss) == 0 {
-				return nil, fmt.Errorf("no TCP services in %s", ns)
+				return nil, fmt.Errorf("no TCP services in %s", where)
 			}
+			// this pane's namespace first, then by namespace and name
+			sort.SliceStable(ss, func(i, j int) bool {
+				if hi, hj := ss[i].Namespace == here, ss[j].Namespace == here; hi != hj {
+					return hi
+				}
+				if ss[i].Namespace != ss[j].Namespace {
+					return ss[i].Namespace < ss[j].Namespace
+				}
+				return ss[i].Name < ss[j].Name
+			})
 			w := 0
 			for _, s := range ss {
-				w = max(w, len(s.Name))
+				w = max(w, len(s.Namespace)+1+len(s.Name))
 			}
 			items := make([]tui.Item, 0, len(ss))
 			for _, s := range ss {
-				svcs[s.Name] = s
-				items = append(items, tui.Item{Key: s.Name, Label: fmt.Sprintf("%-*s", w, s.Name),
+				key := s.Namespace + "/" + s.Name
+				svcs[key] = s
+				items = append(items, tui.Item{Key: key, Label: fmt.Sprintf("%-*s", w, key),
 					Hint: fmt.Sprintf("%-12s %s", s.Type, s.portsText())})
 			}
 			return items, nil
@@ -162,6 +206,7 @@ func (a *app) kpf(args []string) error {
 		return err
 	}
 	s := svcs[it.Key]
+	ns := s.Namespace
 
 	port := s.Ports[0]
 	if len(s.Ports) > 1 {
@@ -183,7 +228,7 @@ func (a *app) kpf(args []string) error {
 		return a.pftail(c.Name, ns, s.Name, mapping)
 	}
 	argv := []string{filepath.Join(a.binDir, "rex8s"), "pftail", c.Name, ns, s.Name, mapping}
-	if err := rex.Split(fmt.Sprintf("pf %s :%d", s.Name, local), argv...); err != nil {
+	if err := rex.SplitBehind(fmt.Sprintf("pf %s :%d", s.Name, local), argv...); err != nil {
 		return err
 	}
 	fmt.Printf("port-forward %s → %s\n", tui.Bold.Render("svc/"+s.Name+":"+strconv.Itoa(port.Port)),

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/vitalbh/rex8s/internal/kube"
@@ -19,8 +20,12 @@ import (
 //	rex8s list services CTX [NS]
 //	rex8s list flux                Flux health of every cluster (menu bar)
 //	rex8s list flux CTX            Flux resources of one cluster
-//	rex8s list failing             failing pods of every cluster (menu bar)
+//	rex8s list failing [--notify]  broken pods of every cluster (menu bar);
+//	                               --notify: macOS notification for new ones
 //	rex8s list pf                  running port-forwards
+//	rex8s list alerts [--notify]   firing alerts of every cluster; --notify: new critical ones
+//	rex8s list workloads           Deployments/StatefulSets/DaemonSets of every cluster
+//	rex8s list fwd                 favorite port-forwards (config forwards)
 //
 // Errors are JSON too: {"error": "...", "loginExpired": true}.
 func (a *app) list(args []string) error {
@@ -81,10 +86,27 @@ func (a *app) listData(args []string) (any, error) {
 		return a.fluxHealthAll()
 	}
 	if args[0] == "failing" {
-		return a.failingAll()
+		out, err := a.failingAll()
+		if err == nil && len(args) > 1 && args[1] == "--notify" {
+			a.notifyNewBroken(out)
+		}
+		return out, err
 	}
 	if args[0] == "pf" {
 		return a.pfList(), nil
+	}
+	if args[0] == "alerts" {
+		out, err := a.alertsAll()
+		if err == nil && len(args) > 1 && args[1] == "--notify" {
+			a.notifyNewCritical(out)
+		}
+		return out, err
+	}
+	if args[0] == "workloads" {
+		return a.workloadsJSON()
+	}
+	if args[0] == "fwd" {
+		return a.favoritesJSON(), nil
 	}
 	if args[0] == "clusters" {
 		raw, err := kube.Load(a.src)
@@ -328,4 +350,39 @@ func (a *app) failingAll() ([]clusterFailingJSON, error) {
 
 func brokenLive(p pod) bool {
 	return p.badge() == "FAIL" && p.Phase != "Failed" && p.Phase != "Succeeded"
+}
+
+type workloadJSON struct {
+	Context   string `json:"context"`
+	Short     string `json:"short"`
+	Prod      bool   `json:"prod"`
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Selector  string `json:"selector"`
+	Image     string `json:"image"`
+	Tag       string `json:"tag"`
+	Spec      string `json:"spec"`   // for wlogtail: ctx|ns|selector|label
+	Target    string `json:"target"` // for kroll --target: ctx|kind|ns|name
+}
+
+func (a *app) workloadsJSON() ([]workloadJSON, error) {
+	k, err := a.kubectl()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := kube.Load(a.src)
+	if err != nil {
+		return nil, err
+	}
+	ws, _ := a.findWorkloads(k, uniqueClusters(kube.Contexts(raw, a.cfg)), "")
+	out := make([]workloadJSON, 0, len(ws))
+	for _, t := range ws {
+		img := mainImage(t)
+		out = append(out, workloadJSON{Context: t.c.Name, Short: t.c.Short, Prod: t.c.Prod, Kind: t.Kind,
+			Namespace: t.Namespace, Name: t.Name, Selector: t.Selector, Image: img, Tag: imageTag(img),
+			Spec:   logSpec{t.c.Name, t.Namespace, t.Selector, t.c.Short + " " + t.Name}.String(),
+			Target: strings.Join([]string{t.c.Name, t.Kind, t.Namespace, t.Name}, "|")})
+	}
+	return out, nil
 }

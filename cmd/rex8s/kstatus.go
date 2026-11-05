@@ -27,14 +27,26 @@ type section struct {
 // Flux, jobs, firing alerts (Alertmanager or Prometheus inside the cluster,
 // when there is one), certificates (cert-manager) and recent warnings.
 // -w refreshes every 30s.
+//
+// --context CTX picks the cluster instead of this pane's (kincident's layout).
 func (a *app) kstatus(args []string) error {
-	watch := false
-	for _, arg := range args {
-		if arg == "-w" {
+	watch, ctxName := false, ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "-w":
 			watch = true
+		case args[i] == "--context" && i+1 < len(args):
+			ctxName = args[i+1]
+			i++
 		}
 	}
-	c, err := kube.Current(a.cfg, "", "")
+	var c kube.Context
+	var err error
+	if ctxName != "" {
+		c, err = a.context(ctxName)
+	} else {
+		c, err = kube.Current(a.cfg, "", "")
+	}
 	if err != nil {
 		return err
 	}
@@ -394,15 +406,28 @@ func statusJobs(cl kube.Client, ctxName string) section {
 
 type firingAlert struct {
 	Name, Severity, Summary string
+	Where                   string // namespace/pod or instance, when the alert says
 }
 
-// statusAlerts reads firing alerts from an Alertmanager or Prometheus that
-// runs in the cluster, through the API server's service proxy (no
-// port-forward). Not shown when the cluster has neither.
-func statusAlerts(cl kube.Client, ctxName string) section {
+type alertSource struct{ ns, name, port, kind string }
+
+func (s alertSource) base() string {
+	return fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy", s.ns, s.name, s.port)
+}
+
+func (s alertSource) fetch(cl kube.Client, ctxName string) ([]firingAlert, error) {
+	if s.kind == "alertmanager" {
+		return alertmanagerAlerts(cl, ctxName, s.base())
+	}
+	return prometheusAlerts(cl, ctxName, s.base())
+}
+
+// alertSources finds an Alertmanager (9093) or Prometheus (9090) service in
+// the cluster, Alertmanager first: it has every firing alert, deduplicated.
+func alertSources(cl kube.Client, ctxName string) []alertSource {
 	out, err := cl.Get(ctxName, "get", "services", "-A", "-o", "json")
 	if err != nil {
-		return section{skip: true}
+		return nil
 	}
 	var list struct {
 		Items []struct {
@@ -418,10 +443,9 @@ func statusAlerts(cl kube.Client, ctxName string) section {
 		} `json:"items"`
 	}
 	if json.Unmarshal(out, &list) != nil {
-		return section{skip: true}
+		return nil
 	}
-	type source struct{ ns, name, port, kind string }
-	var sources []source
+	var sources []alertSource
 	for _, svc := range list.Items {
 		name := svc.Metadata.Name
 		kind := ""
@@ -435,27 +459,46 @@ func statusAlerts(cl kube.Client, ctxName string) section {
 		}
 		for _, p := range svc.Spec.Ports {
 			if (kind == "alertmanager" && p.Port == 9093) || (kind == "prometheus" && p.Port == 9090) {
-				sources = append(sources, source{svc.Metadata.Namespace, name, strconv.Itoa(p.Port), kind})
+				sources = append(sources, alertSource{svc.Metadata.Namespace, name, strconv.Itoa(p.Port), kind})
 			}
 		}
 	}
+	sort.SliceStable(sources, func(i, j int) bool { return sources[i].kind == "alertmanager" && sources[j].kind != "alertmanager" })
+	return sources
+}
+
+func alertWhere(l map[string]string) string {
+	switch {
+	case l["namespace"] != "" && l["pod"] != "":
+		return l["namespace"] + "/" + l["pod"]
+	case l["namespace"] != "" && l["deployment"] != "":
+		return l["namespace"] + "/" + l["deployment"]
+	case l["persistentvolumeclaim"] != "":
+		return l["namespace"] + "/" + l["persistentvolumeclaim"]
+	case l["namespace"] != "" && l["job_name"] != "":
+		return l["namespace"] + "/" + l["job_name"]
+	case l["instance"] != "":
+		return l["instance"]
+	case l["node"] != "":
+		return l["node"]
+	}
+	return l["namespace"]
+}
+
+// statusAlerts reads firing alerts from an Alertmanager or Prometheus that
+// runs in the cluster, through the API server's service proxy (no
+// port-forward). Not shown when the cluster has neither.
+func statusAlerts(cl kube.Client, ctxName string) section {
+	sources := alertSources(cl, ctxName)
 	if len(sources) == 0 {
 		return section{skip: true}
 	}
-	// Alertmanager first: it has every firing alert, deduplicated
-	sort.SliceStable(sources, func(i, j int) bool { return sources[i].kind == "alertmanager" && sources[j].kind != "alertmanager" })
 
 	s := section{name: "Alerts"}
 	var noRules []string
 	for _, src := range sources {
-		base := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy", src.ns, src.name, src.port)
-		var alerts []firingAlert
-		var err error
-		if src.kind == "alertmanager" {
-			alerts, err = alertmanagerAlerts(cl, ctxName, base)
-		} else {
-			alerts, err = prometheusAlerts(cl, ctxName, base)
-		}
+		base := src.base()
+		alerts, err := src.fetch(cl, ctxName)
 		if err != nil {
 			continue
 		}
@@ -497,7 +540,7 @@ func alertmanagerAlerts(cl kube.Client, ctxName, base string) ([]firingAlert, er
 		if r.Labels["alertname"] == "Watchdog" || r.Labels["alertname"] == "InfoInhibitor" {
 			continue // always-firing heartbeats of kube-prometheus-stack
 		}
-		out2 = append(out2, firingAlert{r.Labels["alertname"], r.Labels["severity"], firstNonEmpty(r.Annotations["summary"], r.Annotations["description"], r.Annotations["message"])})
+		out2 = append(out2, firingAlert{r.Labels["alertname"], r.Labels["severity"], firstNonEmpty(r.Annotations["summary"], r.Annotations["description"], r.Annotations["message"]), alertWhere(r.Labels)})
 	}
 	return out2, nil
 }
@@ -524,7 +567,7 @@ func prometheusAlerts(cl kube.Client, ctxName, base string) ([]firingAlert, erro
 		if r.State != "firing" || r.Labels["alertname"] == "Watchdog" || r.Labels["alertname"] == "InfoInhibitor" {
 			continue
 		}
-		alerts = append(alerts, firingAlert{r.Labels["alertname"], r.Labels["severity"], firstNonEmpty(r.Annotations["summary"], r.Annotations["description"], r.Annotations["message"])})
+		alerts = append(alerts, firingAlert{r.Labels["alertname"], r.Labels["severity"], firstNonEmpty(r.Annotations["summary"], r.Annotations["description"], r.Annotations["message"]), alertWhere(r.Labels)})
 	}
 	return alerts, nil
 }

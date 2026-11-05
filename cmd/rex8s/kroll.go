@@ -20,27 +20,46 @@ const rollTimeout = 10 * time.Minute
 // rollouts until every one is done, with progress in the tab header.
 //
 //	kroll [FILTER]
+//
+// --target CTX|KIND|NS|NAME (repeatable) skips the picker (Raycast).
 func (a *app) kroll(args []string) error {
 	filter := ""
-	if len(args) > 0 {
-		filter = args[0]
+	var given []target
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--target" && i+1 < len(args) {
+			p := strings.SplitN(args[i+1], "|", 4)
+			i++
+			if len(p) != 4 {
+				return fmt.Errorf("--target wants CTX|KIND|NS|NAME, got %q", args[i])
+			}
+			c, err := a.context(p[0])
+			if err != nil {
+				return err
+			}
+			given = append(given, target{c: c, Kind: p[1], Namespace: p[2], Name: p[3]})
+			continue
+		}
+		filter = args[i]
 	}
 	k, err := a.kubectl()
 	if err != nil {
 		return err
 	}
-	raw, err := kube.Load(a.src)
-	if err != nil {
-		return err
-	}
-	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
-	var skipped []string
-	targets, _, err := a.pickTargets(k, clusters, filter, "Restart which workloads?", &skipped)
-	for _, s := range skipped {
-		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
-	}
-	if err != nil || len(targets) == 0 {
-		return err
+	targets := given
+	if len(targets) == 0 {
+		raw, err := kube.Load(a.src)
+		if err != nil {
+			return err
+		}
+		clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
+		var skipped []string
+		targets, _, err = a.pickTargets(k, clusters, filter, "Restart which workloads?", &skipped)
+		for _, s := range skipped {
+			fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
+		}
+		if err != nil || len(targets) == 0 {
+			return err
+		}
 	}
 
 	fmt.Println(tui.Bold.Render("rollout restart"))

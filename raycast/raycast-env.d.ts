@@ -11,7 +11,9 @@ type ExtensionPreferences = {
   /** rex8s binary - Path to rex8s. */
   "rexK8s": string,
   /** Rex app name - Brought to the front after opening a tab. */
-  "rexApp": string
+  "rexApp": string,
+  /** Rex session - Session (label or ID) where Raycast opens Rex tabs. Created when missing. */
+  "rexSession": string
 }
 
 /** Preferences accessible in all the extension's commands */
@@ -24,10 +26,14 @@ declare namespace Preferences {
   export type SearchPods = ExtensionPreferences & {}
   /** Preferences accessible in the `search-services` command */
   export type SearchServices = ExtensionPreferences & {}
+  /** Preferences accessible in the `search-workloads` command */
+  export type SearchWorkloads = ExtensionPreferences & {}
   /** Preferences accessible in the `flux-status` command */
   export type FluxStatus = ExtensionPreferences & {}
   /** Preferences accessible in the `failing-pods` command */
   export type FailingPods = ExtensionPreferences & {}
+  /** Preferences accessible in the `alerts` command */
+  export type Alerts = ExtensionPreferences & {}
   /** Preferences accessible in the `search-flux` command */
   export type SearchFlux = ExtensionPreferences & {}
   /** Preferences accessible in the `kube-context` command */
@@ -41,10 +47,14 @@ declare namespace Arguments {
   export type SearchPods = {}
   /** Arguments passed to the `search-services` command */
   export type SearchServices = {}
+  /** Arguments passed to the `search-workloads` command */
+  export type SearchWorkloads = {}
   /** Arguments passed to the `flux-status` command */
   export type FluxStatus = {}
   /** Arguments passed to the `failing-pods` command */
   export type FailingPods = {}
+  /** Arguments passed to the `alerts` command */
+  export type Alerts = {}
   /** Arguments passed to the `search-flux` command */
   export type SearchFlux = {}
   /** Arguments passed to the `kube-context` command */

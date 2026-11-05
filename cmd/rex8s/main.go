@@ -44,6 +44,8 @@ import (
 var version = "dev"
 
 type app struct {
+	paneRun string // pane --run: a command to run before the interactive shell
+
 	cfg    *config.Config
 	binDir string // where rex8s and the wrappers live
 	src    string // master kubeconfig
@@ -70,7 +72,7 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, tui.Err.Render("rex8s: "+err.Error()))
-		if cmd == "pick" || cmd == "pane" || cmd == "k9s" || cmd == "events" || cmd == "logtail" || cmd == "pftail" || cmd == "exectail" || cmd == "warnings" || cmd == "whytail" || cmd == "monitor" || cmd == "nodetail" || cmd == "asktail" {
+		if cmd == "pick" || cmd == "pane" || cmd == "k9s" || cmd == "events" || cmd == "logtail" || cmd == "pftail" || cmd == "exectail" || cmd == "warnings" || cmd == "whytail" || cmd == "monitor" || cmd == "nodetail" || cmd == "asktail" || cmd == "askpod" || cmd == "nettail" || cmd == "wlogtail" || cmd == "fwd" {
 			// runs in a pane that would close immediately: wait so the error can be read
 			fmt.Fprint(os.Stderr, tui.Dim.Render("press enter to close"))
 			bufio.NewReader(os.Stdin).ReadString('\n')
@@ -128,8 +130,15 @@ func (a *app) dispatch(cmd string, args []string) error {
 		}
 		return a.pick(mode)
 	case "pane":
-		layout := len(args) > 0 && args[0] == "--layout"
-		if layout {
+		layout := false
+		for len(args) > 0 && strings.HasPrefix(args[0], "--") {
+			switch {
+			case args[0] == "--layout":
+				layout = true
+			case args[0] == "--run" && len(args) > 1:
+				a.paneRun = args[1]
+				args = args[1:]
+			}
 			args = args[1:]
 		}
 		if err := need(1); err != nil {
@@ -159,12 +168,55 @@ func (a *app) dispatch(cmd string, args []string) error {
 	case "flux":
 		return a.kflux()
 	case "logs":
-		return a.klogs(arg(0))
-	case "logtail":
-		if err := need(3); err != nil {
+		return a.klogs(args)
+	case "fwd":
+		if err := need(1); err != nil {
 			return err
 		}
-		return a.logtail(args[0], args[1], args[2], arg(3))
+		return a.fwd(args[0])
+	case "setup":
+		return a.setup(args)
+	case "uninstall":
+		return a.uninstall(args)
+	case "doctor":
+		return a.doctor(args)
+	case "agents":
+		return a.agents(args)
+	case "agent-guide":
+		return a.agentGuide()
+	case "config":
+		return a.configCmd(args)
+	case "kmulti":
+		return a.kmulti(args)
+	case "kall":
+		return a.kall(args)
+	case "kjunk":
+		return a.kjunk(args)
+	case "kgit":
+		return a.kgit(args)
+	case "kdisk":
+		return a.kdisk(args)
+	case "kincident":
+		return a.kincident(args)
+	case "kreq":
+		return a.kreq(args)
+	case "kcron":
+		return a.kcron(args)
+	case "kgrep":
+		return a.kgrep(args)
+	case "wlogtail":
+		rest, lo := splitLogFlags(args)
+		return a.wlogtail(rest, lo)
+	case "logtail":
+		rest, lo := splitLogFlags(args)
+		if len(rest) < 3 {
+			return fmt.Errorf("logtail: missing arguments (see rex8s help)")
+		}
+		c := ""
+		if len(rest) > 3 {
+			c = rest[3]
+		}
+		return a.logtail(rest[0], rest[1], rest[2], c, lo)
 	case "monitor":
 		return a.monitor(args)
 	case "fdiff":
@@ -192,8 +244,26 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.useContext(args[0])
 	case "kexec":
 		return a.kexec(arg(0))
+	case "kwhat":
+		return a.kwhat(args)
+	case "khelp":
+		return a.khelp(args)
+	case "ktint":
+		return a.ktint(args)
 	case "kask":
 		return a.kask(args)
+	case "askpod":
+		if err := need(3); err != nil {
+			return err
+		}
+		return a.askpod(args[0], args[1], args[2])
+	case "knet":
+		return a.knet()
+	case "nettail":
+		if err := need(2); err != nil {
+			return err
+		}
+		return a.nettail(args[0], args[1])
 	case "asktail":
 		if err := need(3); err != nil {
 			return err
@@ -255,7 +325,7 @@ func usage() {
   rex8s k9s CTX [NS]        k9s
   rex8s events CTX [NS]     kubectl get events -w
   rex8s switch [CTX]        switch this pane's cluster   (kctx)
-  rex8s ns [NS]             switch this pane's namespace (kns)
+  rex8s ns [NS|all]         switch this pane's namespace (kns; all = every namespace)
   rex8s label               refresh the pane label
   rex8s guard TOOL ARGS...  confirm commands that mutate production
   rex8s fwatch [-A] [--now] follow a pushed commit until Flux applies it  (fwatch)
@@ -271,6 +341,23 @@ func usage() {
   rex8s kfail [-n] [FILTER] failing pods with their last logs             (kfail)
   rex8s krun NAME -- CMD    run CMD in every pod of the workloads you mark,
                             on any cluster (e.g. krun nginx -- nginx -s reload)  (krun)
+  rex8s logs [-A] [-g RE] [-s DUR] [FILTER]  logs of a workload (merged) or pod (klogs)
+  rex8s kgrep [-A] [RE]     klogs that searches: asks the pattern after the pick  (kgrep)
+  rex8s setup | doctor | uninstall   install into Rex, check everything, undo
+  rex8s config [get|set|unset|add|remove KEY [VALUE]]   settings (no args: list)
+  rex8s agents install|status|remove  skill for coding agents; agent-guide prints the guide
+  rex8s kmulti [GROUP] [-n NS] [CMD...]  a tab with one pane per cluster you pick (kmulti)
+  rex8s kall CMD...         type CMD in every cluster pane of this tab   (kall)
+  rex8s kjunk [debug|pods|jobs|pv] [FILTER]  leftovers on every cluster: mark and delete  (kjunk)
+  rex8s kgit [FILTER]       where a workload is defined in the GitOps repo (Flux)  (kgit)
+  rex8s kdisk [-A] [-a] [FILTER]  how full PVCs and node disks are (kdisk)
+  rex8s kincident [CLUSTER] a Rex session laid out for an incident; --report / --ask  (kincident)
+  rex8s kreq [-n] [FILTER]  requests/limits vs usage: OOM risk, over-provisioned  (kreq)
+  rex8s kcron [DUR] [FILTER] CronJob runs coming up on every cluster (default 6h)  (kcron)
+  rex8s kwhat [DUR] [FILTER] what changed on every cluster (default 1h)   (kwhat)
+  rex8s knet                network toolbox pod (netshoot) in this namespace, in a split  (knet)
+  rex8s khelp [FILTER]      every command in a picker; enter runs it      (khelp)
+  rex8s ktint [#hex|off] [--save]  production background: picker, try, save  (ktint)
   rex8s kask [FILTER]       Claude conversation in a split with the cluster's problems,
                             a pod (FILTER), or piped input (kubectl logs x | kask)  (kask)
   rex8s kver [-d] [FILTER]  image tag of every workload on every cluster   (kver)
@@ -278,6 +365,7 @@ func usage() {
   rex8s kdiff [FILTER]      compare a workload's spec between two clusters  (kdiff)
   rex8s knode [FILTER]      pick a node, open a shell on it in a split      (knode)
   rex8s kpf -l              running port-forwards: open, copy, stop
+  rex8s kpf NAME | -f       a favorite forward (config forwards): start it, open the browser
   rex8s kstatus [-w]        cluster health on one screen (-w: refresh)     (kstatus)
   rex8s kjobs [-n] [STATE] [FILTER]  Jobs and CronJobs; STATE: failed|running|done|suspended|cron (kjobs)
   rex8s list KIND [CTX] [NS] JSON for launchers: clusters|namespaces|pods|services
@@ -316,6 +404,9 @@ func (a *app) context(name string) (kube.Context, error) {
 func labelText(c kube.Context, ns string) string {
 	if ns == "" {
 		ns = c.Namespace
+		if c.AllNS {
+			ns = kube.AllNamespaces
+		}
 	}
 	if ns == "" {
 		ns = "default"
@@ -531,6 +622,8 @@ func (a *app) pickNamespace(title string, cl kube.Client, ctxName, current strin
 			if withDefault {
 				items = append(items, tui.Item{Key: "", Label: "(context default)", Dim: true})
 			}
+			items = append(items, tui.Item{Key: kube.AllNamespaces, Label: "* all namespaces",
+				Hint: "kubectl get/describe/top add -A; commands on one object ask for -n"})
 			nss, err := cl.Namespaces(ctxName)
 			if err != nil {
 				if withDefault {
@@ -647,9 +740,18 @@ func (a *app) pane(ctxName, ns string, layout bool) error {
 	if sh == "" {
 		sh = "/bin/zsh"
 	}
+	env := setEnv(os.Environ(), "KUBECONFIG", kube.PaneKubeconfig(cfgPath, a.src), "PATH", pathx.Prepend(a.binDir), "REX8S", "1")
+	if a.paneRun != "" { // kmulti CMD: run it first, then the shell stays
+		fmt.Println(tui.Dim.Render("$ ") + a.paneRun)
+		run := exec.Command(sh, "-c", a.paneRun)
+		run.Stdin, run.Stdout, run.Stderr = os.Stdin, os.Stdout, os.Stderr
+		run.Env = env
+		_ = run.Run()
+		fmt.Println()
+	}
 	cmd := exec.Command(sh, "-i")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", kube.PaneKubeconfig(cfgPath, a.src), "PATH", pathx.Prepend(a.binDir), "REX8S", "1")
+	cmd.Env = env
 
 	// the shell handles ctrl-c; we only wait for it to exit to remove the kubeconfig
 	saveRecord(paneRecord{Block: rex.Block(), Context: ctxName, Short: c.Short, NS: ns, Layout: layout, Opened: time.Now()})
@@ -687,10 +789,16 @@ func (a *app) tool(which, ctxName, ns string) error {
 	if which == "k9s" {
 		bin := pathx.Real("k9s", a.binDir)
 		if bin == "" {
-			return errors.New("k9s not found in PATH")
+			// no k9s: the layout still works, with the cluster's status here
+			fmt.Println(tui.Dim.Render("k9s not installed (brew install k9s): showing kstatus instead"))
+			return a.kstatus([]string{"-w", "--context", ctxName})
 		}
 		argv := []string{"k9s", "--context", ctxName}
-		if ns != "" {
+		switch ns {
+		case "":
+		case kube.AllNamespaces:
+			argv = append(argv, "-A")
+		default:
 			argv = append(argv, "-n", ns)
 		}
 		return syscall.Exec(bin, argv, env)
@@ -701,7 +809,7 @@ func (a *app) tool(which, ctxName, ns string) error {
 		return err
 	}
 	argv := []string{"kubectl", "--context", ctxName, "get", "events", "-w"}
-	if ns != "" {
+	if ns != "" && ns != kube.AllNamespaces {
 		argv = append(argv, "-n", ns)
 	} else {
 		argv = append(argv, "-A")
@@ -750,7 +858,10 @@ func (a *app) setNS(ns string) error {
 			return err
 		}
 		curNS := cur.Namespace
-		if curNS == "" {
+		switch {
+		case cur.AllNS:
+			curNS = kube.AllNamespaces
+		case curNS == "":
 			curNS = "default"
 		}
 		picked, ok, err := a.pickNamespace("Namespace in "+cur.Short, cl, cur.Name, curNS, false)
@@ -758,6 +869,9 @@ func (a *app) setNS(ns string) error {
 			return err
 		}
 		ns = picked
+	}
+	if ns == "all" || ns == "-A" || ns == "--all-namespaces" {
+		ns = kube.AllNamespaces
 	}
 	if err := kube.SetNamespace(pane, ns); err != nil {
 		return err
@@ -771,7 +885,11 @@ func (a *app) label() error {
 		return err
 	}
 	l := labelText(c, "")
-	updateRecord(c.Name, c.Short, c.Namespace)
+	recNS := c.Namespace
+	if c.AllNS {
+		recNS = kube.AllNamespaces
+	}
+	updateRecord(c.Name, c.Short, recNS)
 	rex.Rename(l)
 	rex.RenameWindow(l)
 	a.tint(c)
