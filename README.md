@@ -39,10 +39,10 @@ with Flux (GitOps) built in.
 - **`kwhy`**: pick a pod and ask Claude why it is unhealthy (describe with env
   values redacted, events, current and previous logs; tools disabled).
 - **`kask`**: a Claude Code conversation in a split, already holding the
-  context: `kask` sends a snapshot of the cluster's problems (kstatus, broken
-  pods with their last logs, the last hour's warnings), `kask <filter>` one pod
-  (describe with env values redacted, events, logs), and `kubectl logs x | kask`
-  whatever you pipe in. Claude can run read-only `kubectl`/`flux` commands on
+  context. The picker's first row is the whole cluster (kstatus, broken pods
+  with their last logs, the last hour's warnings); below it every pod, broken
+  first (describe with env values redacted, events, logs). `kubectl logs x |
+  kask` sends whatever you pipe in. Claude can run read-only `kubectl`/`flux` commands on
   its own to dig further; anything else asks for your approval, and on
   production the guard refuses changes unless re-run with `REX8S_FORCE=1` (a
   second approval). The context is saved in `~/.cache/rex8s/dumps/`;
@@ -104,6 +104,8 @@ with Flux (GitOps) built in.
 | ![kver](docs/kver.gif) | ![kdiff](docs/kdiff.gif) |
 | **`kroll`**: restart workloads and follow the rollouts | **`knode`**: a shell on a node |
 | ![kroll](docs/kroll.gif) | ![knode](docs/knode.gif) |
+| **`kask`**: talk to Claude about the cluster or a pod | |
+| ![kask](docs/kask.gif) | |
 
 All recordings use the built-in demo mode (fake `example.com` clusters) — see [Demo mode](#demo-mode).
 
@@ -183,7 +185,7 @@ from the context name.
 | `kstatus [-w]` | cluster health on one screen (`-w`: refresh every 30s) |
 | `kjobs [-n] [failed\|running\|done\|suspended\|cron] [filter]` | Jobs and CronJobs; enter: logs, run now, rerun, suspend/resume, delete |
 | `krun [-c container] [name] [-- CMD...]` | pick workloads on any cluster, run CMD in all their pods |
-| `kask [filter]` / `cmd \| kask` | Claude conversation with the cluster's problems, a pod, or piped output (`--dump`: just save the file) |
+| `kask [filter]` / `cmd \| kask` | pick the whole cluster or a pod (or pipe output in) and talk to Claude about it (`--dump`: just save the file) |
 | `kver [-d] [filter]` | image tag of every workload on every cluster (`-d`: only where they differ) |
 | `kdiff [filter]` | compare a workload's spec between two clusters |
 | `kroll [filter]` | pick workloads on any cluster, `rollout restart` them and follow the rollouts |

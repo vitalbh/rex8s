@@ -26,8 +26,8 @@ import (
 // kask opens a Claude Code conversation in a split, already holding context
 // about this pane's cluster:
 //
-//	kask                    a snapshot of the cluster's problems
-//	kask FILTER             one pod (picker): describe, events, logs
+//	kask [FILTER]           picker: the whole cluster (a snapshot of its
+//	                        problems) or one pod (describe, events, logs)
 //	kubectl logs x | kask   whatever comes through the pipe
 //	kask --dump [FILTER]    only save the context file and print its path
 //
@@ -75,17 +75,6 @@ func (a *app) kask(args []string) error {
 		title = "piped input"
 		body = fmt.Sprintf("Output the engineer piped in (%s), from cluster context %s, namespace %s:\n\n```\n%s\n```\n",
 			what, c.Name, ns, tailBytes(stripANSI(string(data)), 60000))
-	case filter != "":
-		sel, err := a.pickPod("Ask Claude about", filter)
-		if err != nil || sel == nil {
-			return err
-		}
-		c, ns = sel.ctx, sel.ns
-		fmt.Fprint(os.Stderr, tui.Dim.Render("gathering describe, events and logs… "))
-		cl := sel.cl
-		cl.Timeout = 20 * time.Second
-		title = "pod " + sel.pod.Name
-		body = gatherPod(cl, c.Name, ns, sel.pod.Name)
 	default:
 		cur, err := kube.Current(a.cfg, "", "")
 		if err != nil {
@@ -97,9 +86,20 @@ func (a *app) kask(args []string) error {
 			return err
 		}
 		cl.Timeout = 20 * time.Second
-		fmt.Fprint(os.Stderr, tui.Dim.Render("gathering the cluster's problems… "))
-		title = "cluster snapshot"
-		body = clusterSnapshot(cl, c)
+		target, p, err := pickAskTarget(cl, c, filter)
+		if err != nil || target == "" {
+			return err
+		}
+		if target == "cluster" {
+			fmt.Fprint(os.Stderr, tui.Dim.Render("gathering the cluster's problems… "))
+			title = "cluster snapshot"
+			body = clusterSnapshot(cl, c)
+		} else {
+			ns = p.Namespace
+			fmt.Fprint(os.Stderr, tui.Dim.Render("gathering describe, events and logs… "))
+			title = "pod " + p.Name
+			body = gatherPod(cl, c.Name, ns, p.Name)
+		}
 	}
 
 	file, err := a.writeDump(c, title, body)
@@ -227,6 +227,59 @@ func (a *app) asktail(ctxName, ns, file string) error {
 		bufio.NewReader(os.Stdin).ReadString('\n')
 	}
 	return nil
+}
+
+// pickAskTarget: the picker — first row the whole cluster, then every pod
+// (broken first) with kfail's preview. Returns "cluster", "pod" or "" (esc).
+func pickAskTarget(cl kube.Client, c kube.Context, filter string) (string, pod, error) {
+	pods := map[string]pod{}
+	it, err := tui.Run(tui.Options{
+		Title: "Ask Claude about… (" + c.Short + ")",
+		Query: filter,
+		Load: func() ([]tui.Item, error) {
+			out, err := cl.Get(c.Name, "get", "pods", "-A", "-o", "json")
+			if err != nil {
+				return nil, err
+			}
+			ps, err := parsePods(out)
+			if err != nil {
+				return nil, err
+			}
+			sort.SliceStable(ps, func(i, j int) bool { return failRank(ps[i]) < failRank(ps[j]) })
+			broken, w := 0, 0
+			for _, p := range ps {
+				w = max(w, len(p.Namespace)+1+len(p.Name))
+				if brokenLive(p) {
+					broken++
+				}
+			}
+			snap := "no broken pods"
+			if broken > 0 {
+				snap = fmt.Sprintf("%d broken", broken)
+			}
+			items := []tui.Item{{Key: "cluster", Label: fmt.Sprintf("%-*s", w, "★ the whole cluster"), Hint: snap}}
+			for _, p := range ps {
+				key := p.Namespace + "/" + p.Name
+				pods[key] = p
+				items = append(items, tui.Item{Key: key, Label: fmt.Sprintf("%-*s", w, key), Badge: p.badge(),
+					Hint: fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.status(), p.Ready, p.Total, p.Restarts, age(p.Created))})
+			}
+			return items, nil
+		},
+		PreviewHead: func(it tui.Item) string {
+			if it.Key == "cluster" {
+				return tui.Bold.Render("The whole cluster "+c.Short) + "\n\n" + tui.Dim.Render("Claude gets the kstatus summary, the broken pods with their last logs and the warnings of the last hour. Then you talk.")
+			}
+			return failHead(pods[it.Key])
+		},
+	})
+	if err != nil || it == nil {
+		return "", pod{}, err
+	}
+	if it.Key == "cluster" {
+		return "cluster", pod{}, nil
+	}
+	return "pod", pods[it.Key], nil
 }
 
 // clusterSnapshot: kstatus's sections, then the details behind them — the
