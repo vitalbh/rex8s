@@ -10,18 +10,20 @@ permissions:
 
 jobs:
   go:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # Linux only: macOS runners count 10x against private repos' free minutes;
+    # rex8s has no cgo, so building and vetting for darwin below catches the
+    # macOS-only mistakes (build tags, syscalls).
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: gofmt
         run: test -z "$(gofmt -l cmd internal)" || { gofmt -l cmd internal; exit 1; }
       - run: go vet ./...
+      - name: vet for macOS
+        run: GOOS=darwin GOARCH=arm64 go vet ./...
       - run: go test ./...
       - run: make build
 
@@ -31,8 +33,8 @@ jobs:
       run:
         working-directory: raycast
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
