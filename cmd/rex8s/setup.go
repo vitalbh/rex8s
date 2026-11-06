@@ -95,11 +95,11 @@ func (a *app) setup(args []string) error {
 			return fmt.Errorf("%s not found next to rex8s (%s)", name, a.binDir)
 		}
 		_ = os.Remove(dst)
-		if strings.Contains(src, "/Cellar/") || strings.Contains(src, "/homebrew/") || strings.Contains(src, "/linuxbrew/") {
-			if err := os.Symlink(src, dst); err != nil {
+		if target, ok := brewStable(src, name); ok {
+			if err := os.Symlink(target, dst); err != nil {
 				return err
 			}
-			step(true, name+" → "+src+" (link: brew upgrade applies)")
+			step(true, name+" → "+target+" (link: brew upgrade applies)")
 		} else {
 			if err := copyFile(src, dst, 0o755); err != nil {
 				return err
@@ -464,4 +464,15 @@ func (a *app) chooseAskAgent(step func(bool, string)) {
 		return
 	}
 	step(true, "kask opens "+it.Key+" (saved; rex8s config set ask_agent to change)")
+}
+
+// brewStable: for a Homebrew install (…/Cellar/rex8s/<version>/bin/NAME),
+// the path that survives upgrades: …/opt/rex8s/bin/NAME.
+func brewStable(src, name string) (string, bool) {
+	i := strings.Index(src, "/Cellar/")
+	if i < 0 {
+		return "", false
+	}
+	rest := strings.SplitN(src[i+len("/Cellar/"):], "/", 2) // formula, version/…
+	return filepath.Join(src[:i], "opt", rest[0], "bin", name), true
 }

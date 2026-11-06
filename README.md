@@ -9,6 +9,13 @@ and Claude.
 **Quick start** — with [Rex](https://www.superlogical.com/rex) and `kubectl` set up:
 
 ```sh
+brew install vitalbh/tap/rex8s && rex8s setup    # setup installs it into Rex
+rex8s doctor                                     # checks everything
+```
+
+or without Homebrew:
+
+```sh
 curl -sL https://github.com/vitalbh/rex8s/releases/latest/download/rex8s_darwin_arm64.tar.gz | tar xz
 ./rex8s_darwin_arm64/rex8s setup     # installs into Rex (Intel Macs: rex8s_darwin_amd64)
 rex8s doctor                         # checks everything (in a rex8s pane, or ~/.config/rex/rex8s/bin/rex8s)
@@ -233,6 +240,13 @@ terminals that don't answer — unacceptable in a wrapper that runs on every
   extension, which installs from a clone of this repository)
 
 ## Install
+
+With Homebrew (updates with `brew upgrade rex8s`, then `rex8s setup` again
+when `rex8s doctor` says the Lua file is outdated):
+
+```sh
+brew install vitalbh/tap/rex8s && rex8s setup
+```
 
 From source (Go 1.26+):
 
