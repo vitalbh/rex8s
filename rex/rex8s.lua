@@ -26,6 +26,7 @@ local function picker(mode)
       -- reached it), and that action queues the select.
       pcall(rex.client.queue, "k8s_focus_window", { window_id = w.window_id })
     end
+    return { window_id = w and w.window_id }
   end
 end
 

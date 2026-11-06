@@ -648,7 +648,8 @@ func (a *app) pickNamespace(title string, cl kube.Client, ctxName, current strin
 
 func (a *app) pick(mode string) error {
 	var extra []tui.Item
-	if lost := lostPanes(); len(lost) > 0 {
+	// demo mode never offers the real tabs to restore (screenshots, recordings)
+	if lost := lostPanes(); len(lost) > 0 && !demo.Active() {
 		extra = append(extra, tui.Item{Key: restoreKey, Label: fmt.Sprintf("restore %d tab(s)", len(lost)),
 			Hint: restoreLabel(lost), Badge: "WAIT"})
 	}

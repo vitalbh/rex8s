@@ -4,7 +4,7 @@ A Kubernetes toolkit for the [Rex](https://www.superlogical.com/rex) terminal:
 isolated cluster panes, multi-cluster views, Flux (GitOps), a production guard
 and Claude.
 
-![cluster picker with live preview](docs/picker.gif)
+![rex8s in Rex: Cmd+Shift+J picks a cluster, kfail, Cmd+Shift+M opens clusters side by side, kall runs the same command in all of them](docs/tour.gif)
 
 **Quick start** — with [Rex](https://www.superlogical.com/rex) and `kubectl` set up:
 
@@ -204,6 +204,8 @@ command? **`khelp`** lists every one in a picker, with its usage; enter runs it.
 | ![kcron](docs/kcron.gif) | ![kjunk](docs/kjunk.gif) |
 | **`khelp`**: every command, enter runs it | **`ktint`**: pick the production color |
 | ![khelp](docs/khelp.gif) | ![ktint](docs/ktint.gif) |
+| **Cluster picker** (⇧⌘J): a live preview of each cluster | |
+| ![cluster picker](docs/picker.gif) | |
 
 All recordings use the built-in demo mode (fake `example.com` clusters) — see [Demo mode](#demo-mode).
 
