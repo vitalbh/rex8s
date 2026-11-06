@@ -9,8 +9,9 @@ and Claude.
 **Quick start** — with [Rex](https://www.superlogical.com/rex) and `kubectl` set up:
 
 ```sh
-git clone https://github.com/vitalbh/rex8s && cd rex8s && make install   # or a release: rex8s setup
-rex8s doctor                                                            # checks everything
+curl -sL https://github.com/vitalbh/rex8s/releases/latest/download/rex8s_darwin_arm64.tar.gz | tar xz
+./rex8s_darwin_arm64/rex8s setup     # installs into Rex (Intel Macs: rex8s_darwin_amd64)
+rex8s doctor                         # checks everything (in a rex8s pane, or ~/.config/rex/rex8s/bin/rex8s)
 ```
 
 Then **⇧⌘J** in Rex: pick a cluster, get a shell on it. Don't remember a
@@ -239,12 +240,18 @@ From source (Go 1.26+):
 make install        # tests, builds, then rex8s setup
 ```
 
-Or from a [release](https://github.com/vitalbh/rex8s/releases) (macOS and Linux, arm64 and amd64):
+Or from the [latest release](https://github.com/vitalbh/rex8s/releases/latest)
+(`rex8s_darwin_arm64`, `rex8s_darwin_amd64`, `rex8s_linux_amd64`,
+`rex8s_linux_arm64`):
 
 ```sh
-tar xzf rex8s_<version>_darwin_arm64.tar.gz
-./rex8s_<version>_darwin_arm64/rex8s setup
+curl -sL https://github.com/vitalbh/rex8s/releases/latest/download/rex8s_darwin_arm64.tar.gz | tar xz
+./rex8s_darwin_arm64/rex8s setup
 ```
+
+The binaries aren't signed by Apple. Downloaded with `curl` as above they just
+run; downloaded in a browser, macOS quarantines them and refuses to open them —
+clear that with `xattr -d com.apple.quarantine rex8s_darwin_arm64/rex8s*`.
 
 `rex8s setup` does everything, and can be run again any time (after an
 upgrade, say): it puts `rex8s` and `rex8s-guard` in `~/.config/rex/rex8s/bin`

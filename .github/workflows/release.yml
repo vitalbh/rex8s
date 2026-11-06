@@ -24,7 +24,9 @@ jobs:
           mkdir -p dist
           for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
             os=${target%/*}; arch=${target#*/}
-            dir=rex8s_${GITHUB_REF_NAME}_${os}_${arch}
+            # no version in the name: releases/latest/download/rex8s_darwin_arm64.tar.gz
+            # always points at the newest one (curl install, Homebrew)
+            dir=rex8s_${os}_${arch}
             mkdir -p "dist/$dir"
             GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/$dir/rex8s" ./cmd/rex8s
             GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "dist/$dir/rex8s-guard" ./cmd/rex8s-guard
