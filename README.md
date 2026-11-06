@@ -6,8 +6,15 @@ and Claude.
 
 ![cluster picker with live preview](docs/picker.gif)
 
-Don't remember a command? **`khelp`** lists every one in a picker, with its
-usage; enter runs it.
+**Quick start** — with [Rex](https://www.superlogical.com/rex) and `kubectl` set up:
+
+```sh
+git clone https://github.com/vitalbh/rex8s && cd rex8s && make install   # or a release: rex8s setup
+rex8s doctor                                                            # checks everything
+```
+
+Then **⇧⌘J** in Rex: pick a cluster, get a shell on it. Don't remember a
+command? **`khelp`** lists every one in a picker, with its usage; enter runs it.
 
 **Panes**
 
@@ -25,8 +32,10 @@ usage; enter runs it.
   Not a fan of red? `ktint` shows presets (wine, purple, navy, teal…) and
   previews each on the pane as you move; enter saves it.
 - **Production guard**: `kubectl`/`helm`/`flux` commands that mutate state, and
-  `kexec` into a pod, ask you to type the cluster name first. Production is
-  detected by server URL, so every alias of the same cluster is covered.
+  `kexec` into a pod, ask you to type the cluster name first; with no terminal
+  to ask (an agent, a script) they are refused until re-run with
+  `REX8S_FORCE=1`. Production is detected by server URL, so every alias of the
+  same cluster is covered.
 - **Expired logins** show up as "login expired" everywhere; picking such a
   cluster takes you straight to `kauth`.
 - **Tabs come back** after the Rex server restarts: the picker offers to restore them.
@@ -218,8 +227,9 @@ terminals that don't answer — unacceptable in a wrapper that runs on every
 
 - [Rex](https://www.superlogical.com/rex), macOS
 - Go 1.26+ (to build)
-- `kubectl`; optional: `k9s`, `helm`, `flux` (for `fdiff`), `claude` (for `kwhy`),
-  Node.js + Raycast (for the Raycast extension)
+- `kubectl`; optional: `k9s`, `helm`, `flux` (for `fdiff`), `claude` (for `kwhy`
+  and `kask`, or `codex` for `kask`), Node.js + Raycast (for the Raycast
+  extension, which installs from a clone of this repository)
 
 ## Install
 
@@ -369,7 +379,7 @@ from the context name.
 | `rex8s use-context CTX` | set the machine's default context (what `kubectl` uses outside rex8s panes) |
 | `REX8S_FORCE=1 kubectl ...` | skip the production confirmation (scripts) |
 
-Command palette (`Cmd+Shift+P`): **Kubernetes: Flux Monitor**, **Kubernetes: Restore Cluster Tabs**.
+Command palette (`Cmd+Shift+P`): **Kubernetes: Flux Monitor**, **Kubernetes: Clusters Side by Side…**, **Kubernetes: Restore Cluster Tabs**.
 
 Picker: arrows or `ctrl+p`/`ctrl+n` move, typing filters (fuzzy), `enter` selects, `esc` quits.
 Key bindings are at the bottom of `rex/rex8s.lua`.
@@ -382,13 +392,13 @@ Everything outside Rex is optional. How to turn each one on or off:
 |---|---|---|---|
 | **Production tint** | every pane | default; color via `prod_background` or `ktint` | `prod_background: off` (or `ktint off --save`) |
 | **macOS notifications** | `fwatch`, Flux monitor, Failing Pods menu bar (a pod that newly broke) | default | `notifications: false` |
-| **Claude** (`claude` CLI) | `kwhy`, `kask` | found on PATH (`claude-auto`, then `claude`); or `ai_command: <cli>` | `ai_command: off` |
+| **Claude / Codex** | `kwhy`, `kask` | `kwhy`: `claude-auto`, then `claude`, or `ai_command: <cli>`; `kask`: `claude` or `codex` (`ask_agent`) | `ai_command: off` |
 | **Login page** | `kauth`, picking a logged-out cluster | `login_url` (or `clusters[].login`) | remove `login_url`; `kauth` still accepts a paste |
 | **Flux CLI** (`flux`) | `fdiff` | install it (`brew install fluxcd/tap/flux`) | don't use `fdiff` |
 | **k9s** | `Cmd+Shift+K` layout | install it | without it, the layout shows `kstatus -w` in its place |
-| **Raycast extension** | Open Cluster, Search Pods/Services/Flux, Flux Status menu bar | `cd raycast && npm install && npm run dev` | Raycast → Extensions → Rex Kubernetes → Uninstall (or disable single commands there) |
+| **Raycast extension** | Open Cluster, Search Pods/Services/Workloads/Flux, the menu bars | `cd raycast && npm install && npm run dev` (from a clone) | Raycast → Extensions → rex8s → Uninstall (or disable single commands there) |
 | **Raycast menu bar** | Flux Status, Failing Pods, Alerts, Kube Context | enable the "Flux Status" / "Failing Pods" / "Alerts" / "Kube Context" commands in Raycast | disable those commands in Raycast settings |
-| **Cluster alerts** | `kstatus` | automatic when an Alertmanager (port 9093) or Prometheus (9090) service runs in the cluster; read through the API server proxy | nothing to turn off: no such service, no Alerts line |
+| **Cluster alerts** | `kstatus`, Alerts menu bar | automatic when an Alertmanager (port 9093) or Prometheus (9090) service runs in the cluster; read through the API server proxy | nothing to turn off: no such service, no Alerts line |
 | **Production guard** | `kubectl`/`helm`/`flux` in panes (and any shell with the PATH) | default: asks at a terminal; without one (agents, scripts) refuses | `REX8S_FORCE=1` per command |
 
 `kwhy` sends the pod's describe output (env values redacted), events and logs to
@@ -450,12 +460,15 @@ rex8s demo off
 demo/record.sh                        # re-record docs/*.gif with VHS (demo mode only for the recording)
 ```
 
+`docs/kmulti.gif` is a screen recording of the real app, driven by
+`demo/kmulti-scene.sh` (demo mode on, Remote Control on).
+
 ## Known limitations
 
 - **Early version.** Used daily on one setup; expect rough edges.
-- **macOS only.** It relies on the Rex app, `osascript` notifications and macOS
-  terminal behavior.
-- **Tested with Rex Beta 0.1.0 (1758).** rex8s uses the Rex CLI and Lua API,
+- **Made on macOS.** Releases include Linux builds, untested there: macOS
+  notifications (`osascript`) and the Raycast extension don't apply.
+- **Tested with Rex Beta 0.1.0 (1829).** rex8s uses the Rex CLI and Lua API,
   which may still change between beta builds.
 - **Login was only tested with OIDC (Dex).** Other auth methods (EKS
   `aws eks get-token`, GKE, client certificates) should work for everything
@@ -467,7 +480,8 @@ demo/record.sh                        # re-record docs/*.gif with VHS (demo mode
 ## Development
 
 ```sh
-make test
+make test                          # go vet + go test
+make install                       # build and rex8s setup
 cd raycast && npx tsc --noEmit -p .
 ```
 
