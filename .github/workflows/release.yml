@@ -5,6 +5,13 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # re-run a release by hand (gh workflow run release.yml -f tag=v0.1.1):
+  # builds that tag with this workflow, refreshes its files and the tap
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: tag to (re)release, e.g. v0.1.1
+        required: true
 
 permissions:
   contents: write
@@ -16,8 +23,11 @@ jobs:
       # a fine-grained token with write access to vitalbh/homebrew-tap; when
       # it isn't set, the tap step is skipped
       TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -32,7 +42,7 @@ jobs:
             # always points at the newest one (curl install, Homebrew)
             dir=rex8s_${os}_${arch}
             mkdir -p "dist/$dir"
-            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/$dir/rex8s" ./cmd/rex8s
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o "dist/$dir/rex8s" ./cmd/rex8s
             GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "dist/$dir/rex8s-guard" ./cmd/rex8s-guard
             cp README.md LICENSE "dist/$dir/"   # rex8s setup writes the Lua file and the commands
             tar -C dist -czf "dist/$dir.tar.gz" "$dir"
@@ -41,17 +51,27 @@ jobs:
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/checksums.txt --generate-notes --title "$GITHUB_REF_NAME"
+        # re-running the workflow for a tag refreshes its files instead of failing
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/checksums.txt --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/checksums.txt --generate-notes --title "$TAG"
+          fi
       - name: update the Homebrew tap
         if: env.TAP_TOKEN != ''
         run: |
           set -eu
           git clone -q "https://x-access-token:${TAP_TOKEN}@github.com/vitalbh/homebrew-tap.git" tap
           mkdir -p tap/Formula
-          scripts/brew-formula.sh "$GITHUB_REF_NAME" dist/checksums.txt > tap/Formula/rex8s.rb
+          scripts/brew-formula.sh "$TAG" dist/checksums.txt > tap/Formula/rex8s.rb
           cd tap
           git config user.name "rex8s release"
           git config user.email "noreply@github.com"
           git add Formula/rex8s.rb
-          git commit -qm "rex8s $GITHUB_REF_NAME"
+          if git diff --cached --quiet; then
+            echo "Formula/rex8s.rb already at $TAG"
+            exit 0
+          fi
+          git commit -qm "rex8s $TAG"
           git push -q
