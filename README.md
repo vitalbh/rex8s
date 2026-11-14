@@ -309,7 +309,7 @@ file (comments included) — refusing if you saved the file meanwhile, and undoi
 a change that would break it. Clusters and forwards are edited in the file.
 
 ```yaml
-kubeconfig: ~/.kube/config
+kubeconfig: ~/.kube/config                 # or a list like KUBECONFIG: ~/.kube/config:~/.kube/lab.yaml
 hide: [ "old context" ]                    # hidden from the picker (exact name)
 clusters:                                  # match = substring of the server URL
   - { match: k8s.us-east.example.com, name: use,     prod: true }

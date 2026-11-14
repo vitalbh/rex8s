@@ -114,10 +114,16 @@ func (c *Config) GitopsDirs() []string {
 	return out
 }
 
-// KubeconfigPath is the "master" kubeconfig that panes are derived from.
+// KubeconfigPath is the "master" kubeconfig that panes are derived from. The
+// setting may list several files like KUBECONFIG (a:b): contexts from all of them
+// are offered, and kubectl writes each credential back to the file it came from.
 func (c *Config) KubeconfigPath() string {
 	if c.Kubeconfig != "" {
-		return expand(c.Kubeconfig)
+		parts := filepath.SplitList(c.Kubeconfig)
+		for i, p := range parts {
+			parts[i] = expand(strings.TrimSpace(p))
+		}
+		return strings.Join(parts, string(os.PathListSeparator))
 	}
 	if kc := os.Getenv("KUBECONFIG"); kc != "" && !strings.Contains(kc, string(os.PathListSeparator)) {
 		return kc

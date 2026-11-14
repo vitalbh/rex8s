@@ -109,3 +109,60 @@ func TestParseFlux(t *testing.T) {
 		t.Fatalf("problems = %+v", st.Problems)
 	}
 }
+
+const fixtureExtra = `apiVersion: v1
+kind: Config
+current-context: lab
+clusters:
+- name: lab
+  cluster: {server: "https://127.0.0.1:16443"}
+users:
+- name: lab
+  user: {token: ccc}
+contexts:
+- name: lab
+  context: {cluster: lab, user: lab}
+`
+
+// The master kubeconfig may be a list (a:b): contexts from every file, the first
+// file's current-context, and panes that reference a context from the second file.
+func TestLoadList(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "config"), filepath.Join(dir, "lab.yaml")
+	if err := os.WriteFile(a, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte(fixtureExtra), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	list := a + string(os.PathListSeparator) + b
+	raw, err := Load(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.CurrentContext != "a" {
+		t.Errorf("current-context = %q, want the first file's (a)", raw.CurrentContext)
+	}
+	for _, name := range []string{"a", "b with space ", "lab"} {
+		if _, ok := raw.Contexts[name]; !ok {
+			t.Errorf("context %q missing from the merged list", name)
+		}
+	}
+	if got := raw.Clusters["lab"].Server; got != "https://127.0.0.1:16443" {
+		t.Errorf("lab server = %q", got)
+	}
+	pane := filepath.Join(dir, "pane.yaml")
+	if err := WritePane(list, "lab", "monitoring", pane); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(pane)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CurrentContext != "lab" || p.Contexts["lab"].Namespace != "monitoring" {
+		t.Errorf("pane = %q/%q", p.CurrentContext, p.Contexts["lab"].Namespace)
+	}
+	if _, err := Load(a); err != nil { // a single path still works
+		t.Fatal(err)
+	}
+}

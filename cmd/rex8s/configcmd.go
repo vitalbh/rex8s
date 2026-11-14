@@ -17,7 +17,7 @@ import (
 
 // configKeys: the settings rex8s config can change, with what each takes.
 var configKeys = map[string]string{
-	"kubeconfig":       "path of the master kubeconfig",
+	"kubeconfig":       "path of the master kubeconfig (or a list a:b, like KUBECONFIG)",
 	"prod_background":  "hex color for production panes, or off (ktint picks one)",
 	"monitor_interval": "how often the Flux monitor polls, e.g. 2m",
 	"login_url":        "page kauth opens when a login expired",

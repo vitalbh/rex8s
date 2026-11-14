@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestLookup(t *testing.T) {
 	c := &Config{Clusters: []Cluster{
@@ -28,5 +32,14 @@ func TestHiddenExact(t *testing.T) {
 	c := &Config{Hide: []string{"Prod US East "}}
 	if !c.Hidden("Prod US East ") || c.Hidden("Prod US East") {
 		t.Fatal("Hidden must compare the exact name, including trailing space")
+	}
+}
+
+func TestKubeconfigPathList(t *testing.T) {
+	h, _ := os.UserHomeDir()
+	c := &Config{Kubeconfig: "~/.kube/config: ~/.kube/lab.yaml"}
+	want := filepath.Join(h, ".kube/config") + string(os.PathListSeparator) + filepath.Join(h, ".kube/lab.yaml")
+	if got := c.KubeconfigPath(); got != want {
+		t.Errorf("KubeconfigPath() = %q, want %q", got, want)
 	}
 }

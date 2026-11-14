@@ -33,7 +33,16 @@ type Context struct {
 	AllNS     bool // the pane shows every namespace (namespace "*")
 }
 
-func Load(path string) (*api.Config, error) { return clientcmd.LoadFromFile(path) }
+// Load reads a kubeconfig. path may be a list (a:b, like KUBECONFIG): the files
+// are merged with kubectl's rules (first file wins for current-context and for
+// entries with the same name).
+func Load(path string) (*api.Config, error) {
+	if !strings.Contains(path, string(os.PathListSeparator)) {
+		return clientcmd.LoadFromFile(path)
+	}
+	rules := &clientcmd.ClientConfigLoadingRules{Precedence: filepath.SplitList(path)}
+	return rules.Load()
+}
 
 // Contexts lists the visible contexts, sorted by short name, then name.
 func Contexts(raw *api.Config, cfg *config.Config) []Context {
@@ -89,7 +98,7 @@ func describe(raw *api.Config, cfg *config.Config, name string, c *api.Context) 
 // would be invalidated ("already claimed by another client"). By referencing
 // the master, all panes share the same credential.
 func WritePane(src, ctxName, ns, dst string) error {
-	raw, err := clientcmd.LoadFromFile(src)
+	raw, err := Load(src)
 	if err != nil {
 		return err
 	}
@@ -192,13 +201,15 @@ func (k Client) run(ctxName string, args ...string) ([]byte, error) {
 	}
 	c, cancel := context.WithTimeout(context.Background(), t)
 	defer cancel()
-	full := []string{"--kubeconfig", k.Kubeconfig}
+	// KUBECONFIG instead of --kubeconfig: the master may be a list of files.
+	var full []string
 	if ctxName != "" {
 		full = append(full, "--context", ctxName)
 	}
 	full = append(full, args...)
 	full = append(full, fmt.Sprintf("--request-timeout=%ds", int(t.Seconds())-1))
 	cmd := exec.CommandContext(c, k.Kubectl, full...)
+	cmd.Env = withKubeconfig(os.Environ(), k.Kubeconfig)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -243,4 +254,15 @@ func (k Client) Namespaces(ctxName string) ([]string, error) {
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+// withKubeconfig returns env with KUBECONFIG set to path (replacing any value).
+func withKubeconfig(env []string, path string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if !strings.HasPrefix(e, "KUBECONFIG=") {
+			out = append(out, e)
+		}
+	}
+	return append(out, "KUBECONFIG="+path)
 }

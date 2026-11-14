@@ -292,7 +292,8 @@ func (a *app) useContext(name string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(k, "config", "use-context", name, "--kubeconfig", a.src)
+	cmd := exec.Command(k, "config", "use-context", name)
+	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src) // the master may be a list (a:b)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	return cmd.Run()
 }
