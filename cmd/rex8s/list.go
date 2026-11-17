@@ -92,8 +92,17 @@ func (a *app) listData(args []string) (any, error) {
 		}
 		return out, err
 	}
-	if args[0] == "pf" {
-		return a.pfList(), nil
+	if args[0] == "pf" { // with the URL and whether a browser opens it
+		type pfJSON struct {
+			pfEntry
+			URL string `json:"url"`
+			Web bool   `json:"web"`
+		}
+		out := []pfJSON{}
+		for _, e := range a.pfList() {
+			out = append(out, pfJSON{e, e.URL(), e.Kind == "" || e.Kind.web()})
+		}
+		return out, nil
 	}
 	if args[0] == "alerts" {
 		out, err := a.alertsAll()

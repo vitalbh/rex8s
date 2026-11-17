@@ -3,16 +3,12 @@ package main
 import (
 	"errors"
 	"fmt"
-	"net"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/vitalbh/rex8s/internal/config"
 	"github.com/vitalbh/rex8s/internal/kube"
-	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
@@ -58,6 +54,26 @@ func (a *app) runningForward(f config.Forward, c kube.Context) (pfEntry, bool) {
 	return pfEntry{}, false
 }
 
+// favKind: what a favorite speaks — the web unless its port is a known
+// database or broker (favorites were made for web UIs; a path means web).
+func favKind(f config.Forward) portKind {
+	if f.Path != "" {
+		return kindHTTP
+	}
+	if k := detectKind(svcPort{Port: f.Port}); k != kindTCP {
+		return k
+	}
+	return kindHTTP
+}
+
+// favoriteURL: favURL for the web, the client URL (postgres://…) otherwise.
+func favoriteURL(f config.Forward, local int) string {
+	if k := favKind(f); !k.web() {
+		return k.url(local)
+	}
+	return favURL(local, f.Path)
+}
+
 func favURL(local int, path string) string {
 	if path != "" && !strings.HasPrefix(path, "/") {
 		path = "/" + path
@@ -65,25 +81,12 @@ func favURL(local int, path string) string {
 	return fmt.Sprintf("http://localhost:%d%s", local, path)
 }
 
-// kpfFavorite: open it if running, else start it (split, or this pane).
-func (a *app) kpfFavorite(f config.Forward) error {
-	c, err := a.clusterContext(f.Cluster)
-	if err != nil {
-		return err
-	}
-	if e, ok := a.runningForward(f, c); ok {
-		url := favURL(e.Local, f.Path)
-		fmt.Println("already running → " + tui.Ok.Render(url))
-		return exec.Command("open", url).Run()
-	}
-	if rex.Block() == "" {
-		return a.fwd(f.Name)
-	}
-	return rex.SplitBehind("pf "+f.Name, filepath.Join(a.binDir, "rex8s"), "fwd", f.Name)
-}
+// kpfFavorite: kpf NAME — the favorite's forward (started in the background
+// when it doesn't run), opened in the browser.
+func (a *app) kpfFavorite(f config.Forward) error { return a.fwd(f.Name) }
 
-// fwd runs a favorite's port-forward in this pane and opens the browser once
-// the local port accepts connections (used by kpf NAME and Raycast).
+// fwd NAME (kpf NAME, Raycast): start the favorite's background forward
+// unless it runs, then open its URL in the browser.
 func (a *app) fwd(name string) error {
 	f, ok := a.favorite(name)
 	if !ok {
@@ -96,33 +99,30 @@ func (a *app) fwd(name string) error {
 	if f.Service == "" || f.Port == 0 {
 		return errors.New("forward " + name + ": service and port are required")
 	}
-	ns := nsOr(f.Namespace)
-	if e, ok := a.runningForward(f, c); ok { // started meanwhile (e.g. twice from Raycast)
-		return exec.Command("open", favURL(e.Local, f.Path)).Run()
+	kind := favKind(f)
+	e, reused, err := a.lazyEnsure(c, nsOr(f.Namespace), f.Service, svcPort{Port: f.Port, Protocol: "TCP", Name: string(kind)}, f.Local)
+	if err != nil {
+		return err
 	}
-	want := f.Local
-	if want == 0 {
-		want = f.Port
+	url := favoriteURL(f, e.Local)
+	if reused {
+		fmt.Println("already running → " + tui.Ok.Render(url))
+	} else {
+		fmt.Println(tui.Bold.Render(f.Name) + " → " + tui.Ok.Render(url) + tui.Dim.Render("  (kubectl connects on first use)"))
 	}
-	local := freePort(want)
-	url := favURL(local, f.Path)
-	go func() {
-		for i := 0; i < 60; i++ {
-			if conn, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(local), 300*time.Millisecond); err == nil {
-				conn.Close()
-				_ = exec.Command("open", url).Run()
-				return
-			}
-			time.Sleep(500 * time.Millisecond)
+	if !kind.web() { // a database: nothing to open; the client command helps
+		if cl := kind.client(e.Local); cl != "" {
+			fmt.Println("  " + cl)
 		}
-	}()
-	return a.pftail(c.Name, ns, f.Service, fmt.Sprintf("%d:%d", local, f.Port))
+		return nil
+	}
+	return exec.Command("open", url).Run()
 }
 
 // kpfFavorites: picker of the favorites (running ones marked).
 func (a *app) kpfFavorites() error {
 	if len(a.cfg.Forwards) == 0 {
-		return fmt.Errorf("no favorite forwards: add \"forwards:\" to %s (see README)", a.cfg.File())
+		return fmt.Errorf("no favorite forwards: add \"forwards:\" to %s (see docs/configuration.md)", a.cfg.File())
 	}
 	w := 0
 	for _, f := range a.cfg.Forwards {
@@ -156,17 +156,19 @@ type favoriteJSON struct {
 	Port      int    `json:"port"`
 	Running   bool   `json:"running"`
 	URL       string `json:"url"` // when running
+	Web       bool   `json:"web"` // opens in a browser (else: copy the URL)
 }
 
 // favoritesJSON for the Raycast menu bar (rex8s list fwd).
 func (a *app) favoritesJSON() []favoriteJSON {
 	out := []favoriteJSON{}
 	for _, f := range a.cfg.Forwards {
-		j := favoriteJSON{Name: f.Name, Cluster: f.Cluster, Namespace: nsOr(f.Namespace), Service: f.Service, Port: f.Port}
+		j := favoriteJSON{Name: f.Name, Cluster: f.Cluster, Namespace: nsOr(f.Namespace), Service: f.Service, Port: f.Port,
+			Web: favKind(f).web()}
 		if c, err := a.clusterContext(f.Cluster); err == nil {
 			j.Prod = c.Prod
 			if e, ok := a.runningForward(f, c); ok {
-				j.Running, j.URL = true, favURL(e.Local, f.Path)
+				j.Running, j.URL = true, favoriteURL(f, e.Local)
 			}
 		}
 		out = append(out, j)

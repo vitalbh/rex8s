@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -43,6 +44,10 @@ type Config struct {
 	ProdBackground string `json:"prod_background"`
 	// MonitorInterval is how often the Flux monitor polls, e.g. "2m".
 	MonitorInterval string `json:"monitor_interval"`
+	// ForwardExpire: a background port-forward with no connection for this
+	// long goes away by itself, e.g. "8h" (the default); "off" keeps them
+	// until stopped.
+	ForwardExpire string `json:"forward_expire"`
 	// LoginURL is the page kauth opens to log in again (e.g. a Dex
 	// authenticator that prints kubectl config commands).
 	LoginURL string `json:"login_url"`
@@ -132,6 +137,20 @@ func (c *Config) KubeconfigPath() string {
 }
 
 // NotificationsOn reports whether macOS notifications are enabled.
+// ForwardExpiry is ForwardExpire as a duration: 8h by default, 0 for "off".
+func (c *Config) ForwardExpiry() time.Duration {
+	switch strings.TrimSpace(c.ForwardExpire) {
+	case "":
+		return 8 * time.Hour
+	case "off", "0", "never":
+		return 0
+	}
+	if d, err := time.ParseDuration(c.ForwardExpire); err == nil && d > 0 {
+		return d
+	}
+	return 8 * time.Hour
+}
+
 func (c *Config) NotificationsOn() bool { return c.Notifications == nil || *c.Notifications }
 
 // Login returns the login page for the cluster at server, or "".

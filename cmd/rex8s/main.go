@@ -228,6 +228,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.kpf(args)
 	case "pfbg":
 		return a.pfbg(args)
+	case "pfopen":
+		return a.pfopen(args)
 	case "kauth":
 		return a.kauth(args)
 	case "list":

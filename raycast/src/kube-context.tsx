@@ -2,6 +2,8 @@ import { Clipboard, Color, Icon, MenuBarExtra, open, showHUD } from "@raycast/ap
 import { useCachedPromise } from "@raycast/utils";
 import { Cluster, FavoriteForward, list, PortForward, rexDo, saveFavorite, stopPortForward, useContext } from "./rex";
 
+const pfURL = (f: PortForward) => f.url ?? `http://localhost:${f.local}`;
+
 export default function Command() {
   const { data, isLoading, revalidate } = useCachedPromise(() => list<Cluster[]>("clusters"), [], {
     keepPreviousData: true,
@@ -13,8 +15,12 @@ export default function Command() {
   const favorites = fav.data ?? [];
 
   async function openFavorite(f: FavoriteForward) {
-    if (f.running && f.url) return open(f.url);
-    await rexDo("k8s_fwd", { name: f.name }, { show: false }); // opens the browser when the port answers
+    if (f.running && f.url) {
+      if (f.web !== false) return open(f.url);
+      await Clipboard.copy(f.url);
+      return showHUD(`Copied ${f.url}`);
+    }
+    await rexDo("k8s_fwd", { name: f.name }, { show: false }); // background forward, then the browser
     await showHUD(`Starting ${f.name}…`);
     setTimeout(() => {
       pf.revalidate();
@@ -58,7 +64,7 @@ export default function Command() {
               icon={{ source: f.running ? Icon.CircleFilled : Icon.Circle, tintColor: f.running ? Color.Green : undefined }}
               title={f.name}
               subtitle={`${f.cluster}${f.prod ? " PROD" : ""} · ${f.namespace}/${f.service}:${f.port}`}
-              tooltip={f.running ? `Open ${f.url}` : "Start the port-forward and open it"}
+              tooltip={f.running ? (f.web === false ? `Copy ${f.url}` : `Open ${f.url}`) : "Start the port-forward"}
               onAction={() => openFavorite(f)}
             />
           ))}
@@ -72,17 +78,19 @@ export default function Command() {
               icon={{ source: Icon.Plug, tintColor: f.prod ? Color.Red : Color.Green }}
               title={`localhost:${f.local} → ${f.short} ${f.namespace}/${f.service}:${f.remote}`}
             >
-              <MenuBarExtra.Item title="Open in Browser" icon={Icon.Globe} onAction={() => open(`http://localhost:${f.local}`)} />
+              {f.web !== false && (
+                <MenuBarExtra.Item title="Open in Browser" icon={Icon.Globe} onAction={() => open(pfURL(f))} />
+              )}
               <MenuBarExtra.Item
                 title="Copy URL"
                 icon={Icon.Clipboard}
                 onAction={async () => {
-                  await Clipboard.copy(`http://localhost:${f.local}`);
-                  await showHUD(`Copied http://localhost:${f.local}`);
+                  await Clipboard.copy(pfURL(f));
+                  await showHUD(`Copied ${pfURL(f)}`);
                 }}
               />
               {!favorites.some(
-                (v) => v.running && v.url?.startsWith(`http://localhost:${f.local}`) && v.service === f.service,
+                (v) => v.running && v.url?.includes(`localhost:${f.local}`) && v.service === f.service,
               ) && (
                 <MenuBarExtra.Item
                   title="Save as Favorite"

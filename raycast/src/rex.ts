@@ -190,6 +190,8 @@ export type PortForward = {
   local: number;
   remote: number;
   started: string;
+  url?: string; // e.g. http://localhost:3000, postgres://localhost:5432
+  web?: boolean; // false: a database or broker, nothing to open in a browser
 };
 
 /** Saves a running port-forward as a favorite (config forwards); returns its name. */
@@ -211,6 +213,7 @@ export type FavoriteForward = {
   port: number;
   running: boolean;
   url?: string;
+  web?: boolean;
 };
 
 export type Workload = {

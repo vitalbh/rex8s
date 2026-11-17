@@ -145,3 +145,27 @@ func TestDetectKind(t *testing.T) {
 		}
 	}
 }
+
+func TestLazyPFExpiresWhenUnused(t *testing.T) {
+	p, addr, _ := fakePF(t, false, kindTCP)
+	gone := make(chan struct{})
+	p.mu.Lock()
+	p.expire, p.onExpire = 400*time.Millisecond, func() { close(gone) }
+	p.mu.Unlock()
+	if got := echo(t, addr, "used"); got != "used" { // a connection resets the clock
+		t.Fatalf("echo = %q", got)
+	}
+	select {
+	case <-gone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("forward did not expire")
+	}
+}
+
+func TestShortDur(t *testing.T) {
+	for d, want := range map[time.Duration]string{10 * time.Minute: "10m", 8 * time.Hour: "8h", 90 * time.Minute: "1h30m"} {
+		if got := shortDur(d); got != want {
+			t.Errorf("shortDur(%v) = %q, want %q", d, got, want)
+		}
+	}
+}

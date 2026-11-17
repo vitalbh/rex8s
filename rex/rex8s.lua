@@ -107,13 +107,21 @@ rex.action{
   end,
 }
 
--- new tab: port-forward a service on a free local port (used by Raycast)
+-- run rex8s in the background (no tab); its error becomes the action's
+local function background(argv)
+  local r, err = rex.exec(argv, { timeout = 60 })
+  if not r then error(err) end
+  if not r.ok then error((r.stderr ~= "" and r.stderr or r.stdout):gsub("%s+$", "")) end
+  return { output = (r.stdout:gsub("%s+$", "")) }
+end
+
+-- port-forward a service in the background on a free local port, and open
+-- it in the browser when it speaks HTTP (used by Raycast)
 rex.action{
   name = "k8s_pf", title = "Kubernetes: Port-forward (ctx, ns, svc, port)", category = "Kubernetes",
   args = { ctx = "string", ns = "string", svc = "string", port = "number" },
   run  = function(ctx, args)
-    return opened(rex.session.new_window{
-      layout = term({ K8S, "pftail", args.ctx, args.ns, args.svc, "auto:" .. tostring(math.floor(args.port)) }, "pf " .. args.svc) })
+    return background({ K8S, "pfopen", args.ctx, args.ns, args.svc, tostring(math.floor(args.port)) })
   end,
 }
 
@@ -246,12 +254,13 @@ rex.action{
   end,
 }
 
--- new tab: a favorite port-forward (config forwards), used by Raycast
+-- a favorite port-forward (config forwards) in the background, opened in
+-- the browser; used by Raycast
 rex.action{
   name = "k8s_fwd", title = "Kubernetes: Favorite Port-forward (name)", category = "Kubernetes",
   args = { name = "string" },
   run  = function(ctx, args)
-    return opened(rex.session.new_window{ focus = false, layout = term({ K8S, "fwd", args.name }, "pf " .. args.name) })
+    return background({ K8S, "fwd", args.name })
   end,
 }
 

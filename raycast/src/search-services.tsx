@@ -1,7 +1,7 @@
-import { Action, ActionPanel, Icon, List } from "@raycast/api";
+import { Action, ActionPanel, Icon, List, showToast, Toast } from "@raycast/api";
 import { useCachedPromise } from "@raycast/utils";
 import { ClusterDropdown, ErrorView, open, prodTag, useClusters, useSelectedContext } from "./common";
-import { list, Service } from "./rex";
+import { list, rexDo, Service } from "./rex";
 
 export default function Command() {
   const clusters = useClusters();
@@ -13,8 +13,20 @@ export default function Command() {
     keepPreviousData: false,
   });
 
-  const forward = (s: Service, port: number) =>
-    open("k8s_pf", { ctx, ns: s.namespace, svc: s.name, port }, `Port-forwarding ${s.name}:${port}…`);
+  // in the background: the browser opens for HTTP, kubectl connects on first use
+  const forward = async (s: Service, port: number) => {
+    const toast = await showToast({ style: Toast.Style.Animated, title: `Port-forwarding ${s.name}:${port}…` });
+    try {
+      await rexDo("k8s_pf", { ctx, ns: s.namespace, svc: s.name, port }, { show: false });
+      toast.style = Toast.Style.Success;
+      toast.title = `Forwarding ${s.name}:${port}`;
+      toast.message = "kpf -l or the menu bar to stop it";
+    } catch (e) {
+      toast.style = Toast.Style.Failure;
+      toast.title = `Port-forward ${s.name}:${port}`;
+      toast.message = e instanceof Error ? e.message : String(e);
+    }
+  };
 
   return (
     <List

@@ -30,6 +30,8 @@ type lazyPF struct {
 	logf      func(format string, args ...any)
 	startWait time.Duration
 	tick      time.Duration // how often idle is checked (0: 15s)
+	expire    time.Duration // no connection this long: onExpire (0: never)
+	onExpire  func()
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -125,7 +127,14 @@ func (p *lazyPF) reap() {
 			p.cmd = nil
 			p.logf("idle for %s: kubectl stopped until the next connection", p.idle)
 		}
+		expired := p.expire > 0 && p.onExpire != nil && p.active == 0 && time.Since(p.lastUse) > p.expire
 		p.mu.Unlock()
+		if expired {
+			p.logf("unused for %s: the forward goes away", p.expire)
+			p.stop()
+			p.onExpire()
+			return
+		}
 	}
 }
 
