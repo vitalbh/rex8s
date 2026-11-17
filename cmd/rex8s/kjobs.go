@@ -221,10 +221,13 @@ var jobStates = map[string]bool{"failed": true, "running": true, "done": true, "
 // suspended | cron; any other word is the initial filter. Preview: events and
 // last log lines of a Job, recent runs of a CronJob. Enter: actions (run now,
 // suspend/resume, logs, delete…); changes go through the production guard.
+// -A: every cluster.
 func (a *app) kjobs(args []string) error {
-	allNS, state, filter := true, "", ""
+	allNS, state, filter, every := true, "", "", false
 	for _, arg := range args {
 		switch {
+		case arg == "-A":
+			every = true
 		case arg == "-n":
 			allNS = false
 		case jobStates[arg]:
@@ -233,10 +236,22 @@ func (a *app) kjobs(args []string) error {
 			filter = arg
 		}
 	}
+	if every {
+		return a.kjobsAll(state, filter)
+	}
 	c, err := kube.Current(a.cfg, "", "")
 	if err != nil {
 		return err
 	}
+	return a.kjobsCluster(c, allNS, state, filter)
+}
+
+// kjobsOn: kjobs on cluster c (every namespace), filtered.
+func (a *app) kjobsOn(c kube.Context, filter string) error {
+	return a.kjobsCluster(c, true, "", filter)
+}
+
+func (a *app) kjobsCluster(c kube.Context, allNS bool, state, filter string) error {
 	cl, err := a.client(a.src)
 	if err != nil {
 		return err
@@ -300,12 +315,28 @@ func (a *app) kjobs(args []string) error {
 }
 
 func jobItems(jobs []job, crons []cronJob, state string, jobsByKey map[string]job, cronsByKey map[string]cronJob, cronStates map[string]string) ([]tui.Item, error) {
-	type row struct {
-		rank int
-		when time.Time
-		item tui.Item
+	rows := jobRows(jobs, crons, state, "", "", jobNameWidth(jobs, crons), jobsByKey, cronsByKey, cronStates)
+	if len(rows) == 0 {
+		if state != "" {
+			return nil, fmt.Errorf("no %s jobs", state)
+		}
+		return nil, fmt.Errorf("no jobs or cronjobs")
 	}
-	var rows []row
+	sortJobRows(rows)
+	items := make([]tui.Item, len(rows))
+	for i, r := range rows {
+		items[i] = r.item
+	}
+	return items, nil
+}
+
+type jobRow struct {
+	rank int
+	when time.Time
+	item tui.Item
+}
+
+func jobNameWidth(jobs []job, crons []cronJob) int {
 	w := 0
 	for _, j := range jobs {
 		w = max(w, len(j.Namespace)+1+len(j.Name))
@@ -313,15 +344,22 @@ func jobItems(jobs []job, crons []cronJob, state string, jobsByKey map[string]jo
 	for _, cj := range crons {
 		w = max(w, len(cj.Namespace)+1+len(cj.Name))
 	}
+	return w
+}
+
+// jobRows: one row per Job and CronJob that passes state; keyPrefix and
+// labelPrefix tell clusters apart in kjobs -A ("" for one cluster).
+func jobRows(jobs []job, crons []cronJob, state, keyPrefix, labelPrefix string, w int, jobsByKey map[string]job, cronsByKey map[string]cronJob, cronStates map[string]string) []jobRow {
+	var rows []jobRow
 	if state != "cron" && state != "suspended" {
 		for _, j := range jobs {
 			if state != "" && j.State != state {
 				continue
 			}
-			key := "job/" + j.Namespace + "/" + j.Name
+			key := keyPrefix + "job/" + j.Namespace + "/" + j.Name
 			jobsByKey[key] = j
 			rank := map[string]int{"failed": 0, "running": 1, "done": 3}[j.State]
-			rows = append(rows, row{rank, j.Start, tui.Item{Key: key, Label: fmt.Sprintf("job  %-*s", w, j.Namespace+"/"+j.Name), Hint: j.hint(), Badge: j.badge()}})
+			rows = append(rows, jobRow{rank, j.Start, tui.Item{Key: key, Label: labelPrefix + fmt.Sprintf("job  %-*s", w, j.Namespace+"/"+j.Name), Hint: j.hint(), Badge: j.badge()}})
 		}
 	}
 	if state == "" || state == "cron" || state == "suspended" {
@@ -330,28 +368,22 @@ func jobItems(jobs []job, crons []cronJob, state string, jobsByKey map[string]jo
 			if state == "suspended" && !cj.Suspend {
 				continue
 			}
-			key := "cron/" + cj.Namespace + "/" + cj.Name
+			key := keyPrefix + "cron/" + cj.Namespace + "/" + cj.Name
 			cronsByKey[key], cronStates[key] = cj, st
-			rows = append(rows, row{2, cj.LastRun, tui.Item{Key: key, Label: fmt.Sprintf("cron %-*s", w, cj.Namespace+"/"+cj.Name), Hint: cj.hint(st), Badge: cronBadge(st)}})
+			rows = append(rows, jobRow{2, cj.LastRun, tui.Item{Key: key, Label: labelPrefix + fmt.Sprintf("cron %-*s", w, cj.Namespace+"/"+cj.Name), Hint: cj.hint(st), Badge: cronBadge(st)}})
 		}
 	}
-	if len(rows) == 0 {
-		if state != "" {
-			return nil, fmt.Errorf("no %s jobs", state)
-		}
-		return nil, fmt.Errorf("no jobs or cronjobs")
-	}
+	return rows
+}
+
+// sortJobRows: failed, running, cronjobs, done; the most recent first.
+func sortJobRows(rows []jobRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].rank != rows[j].rank {
 			return rows[i].rank < rows[j].rank
 		}
 		return rows[i].when.After(rows[j].when)
 	})
-	items := make([]tui.Item, len(rows))
-	for i, r := range rows {
-		items[i] = r.item
-	}
-	return items, nil
 }
 
 func jobHead(j job) string {
@@ -483,7 +515,7 @@ func (a *app) cronAction(c kube.Context, cj cronJob) error {
 	case "run":
 		return a.runCron(c, cj.Namespace, cj.Name)
 	case "jobs":
-		return a.kjobs([]string{cj.Name})
+		return a.kjobsOn(c, cj.Name)
 	case "suspend", "resume":
 		patch := fmt.Sprintf(`{"spec":{"suspend":%v}}`, act.Key == "suspend")
 		return a.runKubectl(true, "--context", c.Name, "-n", cj.Namespace, "patch", "cronjob", cj.Name, "--type", "merge", "-p", patch)

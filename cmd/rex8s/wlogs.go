@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -237,22 +238,81 @@ func matchesSelector(p pod, t target) bool {
 	return strings.HasPrefix(p.Name, t.Name+"-")
 }
 
-// klogsClusters: workloads on any cluster (krun's picker), logs merged.
+// klogsClusters: klogs -A — workloads and pods of every cluster in one
+// picker; mark any mix (space) and they follow in one stream, each line led
+// by its source.
 func (a *app) klogsClusters(filter string, lo logOpts, ask bool) error {
-	k, err := a.kubectl()
+	reads, skipped, err := a.readAllClusters("workloads and pods",
+		[]string{"get", "deployments,statefulsets,daemonsets", "-A", "-o", "json"},
+		[]string{"get", "pods", "-A", "-o", "json"})
 	if err != nil {
 		return err
 	}
-	raw, err := kube.Load(a.src)
-	if err != nil {
-		return err
+	type source struct {
+		c    kube.Context
+		t    *target // a workload, or
+		p    *pod    // a single pod
+		name string  // ns/name
 	}
-	var skipped []string
-	targets, _, err := a.pickTargets(k, uniqueClusters(kube.Contexts(raw, a.cfg)), filter, "Follow the logs of which workloads?", &skipped)
-	for _, s := range skipped {
-		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
+	var srcs []source
+	for _, r := range reads {
+		ws, _ := parseWorkloadSelectors(r.out[0])
+		for _, t := range ws {
+			if t.Selector != "" {
+				t.c = r.c
+				srcs = append(srcs, source{c: r.c, t: &t, name: t.Namespace + "/" + t.Name})
+			}
+		}
+		ps, err := parsePods(r.out[1])
+		if err != nil {
+			skipped = append(skipped, r.c.Short+": "+err.Error())
+			continue
+		}
+		for _, p := range ps {
+			srcs = append(srcs, source{c: r.c, p: &p, name: p.Namespace + "/" + p.Name})
+		}
 	}
-	if err != nil || len(targets) == 0 {
+	printSkipped(skipped)
+	if len(srcs) == 0 {
+		return fmt.Errorf("no workloads or pods on any cluster")
+	}
+	// per cluster: workloads, then pods (failing first)
+	rank := map[string]int{"FAIL": 0, "WAIT": 1, "ok": 2, "done": 3}
+	sort.SliceStable(srcs, func(i, j int) bool {
+		x, y := srcs[i], srcs[j]
+		if x.c.Short != y.c.Short {
+			return x.c.Short < y.c.Short
+		}
+		if (x.t != nil) != (y.t != nil) {
+			return x.t != nil
+		}
+		if x.p != nil && y.p != nil && rank[x.p.badge()] != rank[y.p.badge()] {
+			return rank[x.p.badge()] < rank[y.p.badge()]
+		}
+		return x.name < y.name
+	})
+	wc, wn := 0, 0
+	for _, s := range srcs {
+		wc, wn = max(wc, len(s.c.Short)), max(wn, len(s.name))
+	}
+	items := make([]tui.Item, len(srcs))
+	for i, s := range srcs {
+		it := tui.Item{Key: strconv.Itoa(i)}
+		if s.t != nil {
+			it.Label = fmt.Sprintf("%-*s  %-6s %-*s", wc, s.c.Short, kube.ShortKind(s.t.Kind), wn, s.name)
+			it.Hint, it.Badge = "all its pods, merged", "ALL"
+		} else {
+			p := s.p
+			it.Label = fmt.Sprintf("%-*s  %-6s %-*s", wc, s.c.Short, "pod", wn, s.name)
+			it.Hint = fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.status(), p.Ready, p.Total, p.Restarts, age(p.Created))
+			it.Badge = p.badge()
+		}
+		items[i] = it
+	}
+	chosen, err := tui.RunMulti(tui.Options{
+		Title: clustersTitle("Logs · space marks several (workloads and pods), one stream", len(reads), skipped),
+		Items: items, Query: filter})
+	if err != nil || len(chosen) == 0 {
 		return err
 	}
 	if ask {
@@ -263,18 +323,56 @@ func (a *app) klogsClusters(filter string, lo logOpts, ask bool) error {
 			return err
 		}
 	}
-	var specs []string
-	for _, t := range targets {
-		if t.Selector == "" {
-			continue
+	var specs, names []string
+	for _, it := range chosen {
+		i, _ := strconv.Atoi(it.Key)
+		s := srcs[i]
+		if s.t != nil {
+			specs = append(specs, logSpec{s.c.Name, s.t.Namespace, s.t.Selector, s.c.Short + " " + s.t.Name}.String())
+			names = append(names, s.t.Name)
+		} else {
+			specs = append(specs, logSpec{s.c.Name, s.p.Namespace, podSelector + s.p.Name, s.c.Short + " " + s.p.Name}.String())
+			names = append(names, s.p.Name)
 		}
-		specs = append(specs, logSpec{t.c.Name, t.Namespace, t.Selector, t.c.Short + " " + t.Name}.String())
 	}
 	if rex.Block() == "" {
 		return a.wlogtail(specs, lo)
 	}
+	label := "logs " + names[0]
+	if len(names) > 1 {
+		label = fmt.Sprintf("logs %s +%d", names[0], len(names)-1)
+	}
 	argv := append([]string{filepath.Join(a.binDir, "rex8s"), "wlogtail"}, lo.flags()...)
-	return rex.SplitBehind("logs "+describeTargets(targets), append(argv, specs...)...)
+	return rex.SplitBehind(label, append(argv, specs...)...)
+}
+
+// podSelector marks a logSpec that follows one pod instead of a workload.
+const podSelector = "pod:"
+
+// followPod follows one pod's logs until the pod is gone.
+func (a *app) followPod(k string, s logSpec, label lineLabel, out *sync.Mutex, since string, re *regexp.Regexp) {
+	name := strings.TrimPrefix(s.selector, podSelector)
+	links := a.newLogLinker(s.ctx, s.ns)
+	args := []string{"--context", s.ctx, "-n", s.ns, "logs", "-f", name, "--all-containers", "--prefix"}
+	if since != "" {
+		args = append(args, "--since="+since)
+	} else if re != nil {
+		args = append(args, "--tail=500")
+	} else {
+		args = append(args, "--tail=30")
+	}
+	cmd := exec.Command(k, args...)
+	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
+	pipe, _ := cmd.StdoutPipe()
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	copyLines(pipe, out, re, links, label, "")
+	_ = cmd.Wait()
+	out.Lock()
+	fmt.Println(label("", "") + tui.Dim.Render("(logs of pod "+name+" ended)"))
+	out.Unlock()
 }
 
 var streamColors = []string{"39", "214", "170", "42", "203", "111"}
@@ -320,14 +418,11 @@ func (a *app) wlogtail(raw []string, lo logOpts) error {
 	var out sync.Mutex
 	var wg sync.WaitGroup
 	for i, s := range specs {
-		prefix := ""
-		if len(specs) > 1 {
-			prefix = lipgloss.NewStyle().Foreground(lipgloss.Color(streamColors[i%len(streamColors)])).Render(s.label) + " "
-		}
+		label := streamLabel(s, streamColors[i%len(streamColors)], len(specs) > 1)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a.followWorkload(k, s, prefix, &out, lo.since, re)
+			a.followWorkload(k, s, label, &out, lo.since, re)
 		}()
 	}
 	wg.Wait()
@@ -336,12 +431,17 @@ func (a *app) wlogtail(raw []string, lo logOpts) error {
 	return nil
 }
 
-func (a *app) followWorkload(k string, s logSpec, prefix string, out *sync.Mutex, since string, re *regexp.Regexp) {
+func (a *app) followWorkload(k string, s logSpec, label lineLabel, out *sync.Mutex, since string, re *regexp.Regexp) {
+	if strings.HasPrefix(s.selector, podSelector) {
+		a.followPod(k, s, label, out, since, re)
+		return
+	}
+	links := a.newLogLinker(s.ctx, s.ns)
 	for {
 		names, err := runningPods(k, a.src, s.ctx, s.ns, s.selector)
 		if err != nil || len(names) == 0 {
 			out.Lock()
-			fmt.Println(prefix + tui.Dim.Render("(no running pods; retrying)"))
+			fmt.Println(label("", "") + tui.Dim.Render("(no running pods; retrying)"))
 			out.Unlock()
 			time.Sleep(10 * time.Second)
 			continue
@@ -366,7 +466,7 @@ func (a *app) followWorkload(k string, s logSpec, prefix string, out *sync.Mutex
 		}
 		done := make(chan struct{})
 		go func() {
-			copyLines(pipe, prefix, out, re)
+			copyLines(pipe, out, re, links, label, "")
 			close(done)
 		}()
 		// restart when the pods change, so new ones are followed too
@@ -393,24 +493,64 @@ func (a *app) followWorkload(k string, s logSpec, prefix string, out *sync.Mutex
 		}
 		if changed {
 			out.Lock()
-			fmt.Println(prefix + tui.Dim.Render("── pods changed, following the new set ──"))
+			fmt.Println(label("", "") + tui.Dim.Render("── pods changed, following the new set ──"))
 			out.Unlock()
 		}
 		since = "30s" // the new pods' first lines (a few may repeat)
 	}
 }
 
-func copyLines(r io.Reader, prefix string, out *sync.Mutex, re *regexp.Regexp) {
+// lineLabel is what leads a log line, given the pod and container that
+// wrote it ("" when unknown).
+type lineLabel func(pod, container string) string
+
+// copyLines prints the lines that pass the grep, with their cluster URLs
+// made clickable (links may be nil). kubectl's "[pod/NAME/CONTAINER] "
+// prefix is taken off and handed to label; pod is the pod writing the lines
+// when kubectl does not prefix them.
+func copyLines(r io.Reader, out *sync.Mutex, re *regexp.Regexp, links *logLinker, label lineLabel, pod string) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
-		line, ok := grepLine(sc.Text(), re)
-		if !ok {
+		raw, p, c := sc.Text(), pod, ""
+		if m := podPrefixRe.FindStringSubmatch(raw); m != nil {
+			p, c, raw = m[1], m[2], raw[len(m[0]):]
+		}
+		if re != nil && !re.MatchString(raw) {
 			continue
 		}
+		// links first: the highlight must not split a URL, and skips the
+		// links' targets
+		line := highlightOutsideLinks(links.line(raw, p), re)
 		out.Lock()
-		fmt.Println(prefix + line)
+		fmt.Println(label(p, c) + line)
 		out.Unlock()
+	}
+}
+
+// streamLabel: for a stream of several sources "CLUSTER POD" in the
+// source's color, for one source the pod alone, dim; the container only
+// when it is not named like the workload or the pod (web-7d9f/web).
+func streamLabel(s logSpec, color string, multi bool) lineLabel {
+	short, name, _ := strings.Cut(s.label, " ")
+	style := tui.Dim
+	if multi {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+	}
+	return func(pod, container string) string {
+		text := s.label
+		if pod != "" {
+			text = pod
+			if multi {
+				text = short + " " + pod
+			}
+			if container != "" && container != name && !strings.HasPrefix(pod, container) {
+				text += "/" + container
+			}
+		} else if !multi {
+			return ""
+		}
+		return style.Render(text) + " "
 	}
 }
 
@@ -468,6 +608,25 @@ func splitLogFlags(args []string) ([]string, logOpts) {
 }
 
 var matchStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("214"))
+
+var osc8Re = regexp.MustCompile("\x1b\\]8;;[^\x1b]*\x1b\\\\")
+
+// highlightOutsideLinks highlights re's matches in the visible text only,
+// leaving the OSC 8 link sequences (and their targets) untouched.
+func highlightOutsideLinks(line string, re *regexp.Regexp) string {
+	if re == nil {
+		return line
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range osc8Re.FindAllStringIndex(line, -1) {
+		b.WriteString(re.ReplaceAllStringFunc(line[last:m[0]], func(x string) string { return matchStyle.Render(x) }))
+		b.WriteString(line[m[0]:m[1]])
+		last = m[1]
+	}
+	b.WriteString(re.ReplaceAllStringFunc(line[last:], func(x string) string { return matchStyle.Render(x) }))
+	return b.String()
+}
 
 // grepLine: with no pattern every line passes; otherwise only matching
 // lines, with the matches highlighted.

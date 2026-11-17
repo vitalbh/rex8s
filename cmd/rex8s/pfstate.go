@@ -31,9 +31,16 @@ type pfEntry struct {
 	Local     int       `json:"local"`
 	Remote    int       `json:"remote"`
 	Started   time.Time `json:"started"`
+	Kind      portKind  `json:"kind,omitempty"` // empty: http (pftail, before kinds)
+	Lazy      bool      `json:"lazy,omitempty"` // kubectl runs only while in use
 }
 
-func (e pfEntry) URL() string { return fmt.Sprintf("http://localhost:%d", e.Local) }
+func (e pfEntry) URL() string {
+	if e.Kind == "" {
+		return kindHTTP.url(e.Local)
+	}
+	return e.Kind.url(e.Local)
+}
 
 func (a *app) pfDir() string { return filepath.Join(a.cache, "pf") }
 
@@ -102,7 +109,7 @@ func (a *app) kpfList() error {
 		byKey[k] = e
 		items = append(items, tui.Item{Key: k, Badge: prodBadgeBool(e.Prod),
 			Label: fmt.Sprintf("%-*s  %-*s → :%d", cw, e.Short, sw, fmt.Sprintf("%s/%s:%d", e.Namespace, e.Service, e.Remote), e.Local),
-			Hint:  "since " + age(e.Started)})
+			Hint:  strings.TrimSpace(string(e.Kind) + "  since " + age(e.Started))})
 	}
 	it, err := tui.Run(tui.Options{Title: fmt.Sprintf("Port-forwards (%d running)", len(es)), Items: items})
 	if err != nil || it == nil {
@@ -113,7 +120,7 @@ func (a *app) kpfList() error {
 		{Key: "open", Label: fmt.Sprintf("%-6s", "open"), Hint: "open " + e.URL() + " in the browser"},
 		{Key: "copy", Label: fmt.Sprintf("%-6s", "copy"), Hint: "copy " + e.URL()},
 		{Key: "save", Label: fmt.Sprintf("%-6s", "save"), Hint: "save as a favorite (kpf NAME starts it again, also in Raycast)"},
-		{Key: "stop", Label: fmt.Sprintf("%-6s", "stop"), Hint: "stop it (its pane closes)"},
+		{Key: "stop", Label: fmt.Sprintf("%-6s", "stop"), Hint: stopHint(e)},
 	}})
 	if err != nil || act == nil {
 		return err
@@ -148,6 +155,13 @@ func (a *app) kpfList() error {
 		fmt.Printf("stopped %s/%s on %s\n", e.Namespace, e.Service, e.Short)
 	}
 	return nil
+}
+
+func stopHint(e pfEntry) string {
+	if e.Lazy {
+		return "stop it (frees the local port)"
+	}
+	return "stop it (its pane closes)"
 }
 
 func prodBadgeBool(prod bool) string {

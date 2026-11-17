@@ -258,12 +258,15 @@ func (a *app) logtail(ctxName, ns, podName, container string, lo logOpts) error 
 	cmd := exec.Command(bin, args...)
 	cmd.Stderr = os.Stderr
 	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-	if re == nil {
-		cmd.Stdout = os.Stdout
-		_ = cmd.Run()
-	} else if pipe, err := cmd.StdoutPipe(); err == nil && cmd.Start() == nil {
+	if pipe, err := cmd.StdoutPipe(); err == nil && cmd.Start() == nil {
 		var mu sync.Mutex
-		copyLines(pipe, "", &mu, re)
+		containerLabel := func(_, c string) string { // only with --all-containers
+			if c == "" {
+				return ""
+			}
+			return tui.Dim.Render(c) + " "
+		}
+		copyLines(pipe, &mu, re, a.newLogLinker(ctxName, ns), containerLabel, podName)
 		_ = cmd.Wait()
 	}
 	fmt.Fprint(os.Stderr, tui.Dim.Render("\nlogs ended · press enter to close"))

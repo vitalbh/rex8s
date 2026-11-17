@@ -26,7 +26,7 @@ import (
 var wrapperCmds = map[string]string{
 	"kctx": "switch", "kns": "ns", "kflux": "flux", "klogs": "logs",
 	"fwatch": "fwatch", "fdiff": "fdiff", "kpf": "kpf", "kauth": "kauth", "kexec": "kexec",
-	"kwarn": "kwarn", "kwhy": "kwhy", "kfail": "kfail", "kjobs": "kjobs", "kstatus": "kstatus",
+	"kwarn": "kwarn", "kwhy": "kwhy", "kfail": "kfail", "kjobs": "kjobs", "kpods": "kpods", "kstatus": "kstatus",
 	"krun": "krun", "kver": "kver", "kroll": "kroll", "kdiff": "kdiff", "knode": "knode",
 	"kask": "kask", "ktint": "ktint", "khelp": "khelp", "knet": "knet", "kwhat": "kwhat",
 	"kgrep": "kgrep", "kcron": "kcron", "kreq": "kreq", "kincident": "kincident",

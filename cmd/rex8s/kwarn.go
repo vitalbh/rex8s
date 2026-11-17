@@ -21,11 +21,16 @@ import (
 //
 //	kwarn        all namespaces of this pane's cluster
 //	kwarn -n     only this pane's namespace
+//	kwarn -A [CLUSTER...]  every cluster (or the ones named), one stream
 func (a *app) kwarn(args []string) error {
 	fs := flag.NewFlagSet("kwarn", flag.ContinueOnError)
 	nsOnly := fs.Bool("n", false, "only the pane's namespace")
+	every := fs.Bool("A", false, "every cluster (or the ones named), one stream")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *every {
+		return a.kwarnAll(fs.Args())
 	}
 	c, err := kube.Current(a.cfg, "", "")
 	if err != nil {

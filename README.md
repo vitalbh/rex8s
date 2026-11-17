@@ -99,13 +99,19 @@ command? **`khelp`** lists every one in a picker, with its usage; enter runs it.
   Alertmanager or Prometheus inside the cluster, when there is one), expiring
   certificates (cert-manager) and the last hour's warnings. `-w` refreshes.
 - **`kjobs`**: Jobs and CronJobs, failed first, with logs and recent runs in the
-  preview; run a CronJob now, rerun, suspend/resume, delete.
+  preview; run a CronJob now, rerun, suspend/resume, delete. `kjobs -A` does
+  it for every cluster at once.
 - **`kfail`**: only the unhealthy pods of the cluster, with their recent events and
   last log lines in the preview — the crashed container's logs when it restarted.
   Logs are fetched only for the pod under the cursor. Enter: logs, why, ask
-  (a `kask` conversation), shell, describe, events.
+  (a `kask` conversation), shell, describe, events. `kfail -A`: every cluster.
+- **`kpods`**: the pods of every cluster in one picker, the ones that need
+  attention first in each cluster; same preview and actions as `kfail`.
+  `kpods failing` is `kfail` on every cluster.
 - **`kwarn`**: only Warning events (OOMKilled, BackOff, probes, image pulls),
-  deduplicated. Also the bottom pane of the k9s layout.
+  deduplicated. Also the bottom pane of the k9s layout. `kwarn -A` streams
+  every cluster's (or `kwarn -A use euw`: those) in one pane, each line led by
+  its cluster.
 - **`krun`**: run a command in every pod of workloads on several clusters at
   once. `krun` opens a picker with every Deployment, StatefulSet and DaemonSet
   of every cluster (names may differ per cluster): type to filter, mark with
@@ -114,18 +120,29 @@ command? **`khelp`** lists every one in a picker, with its usage; enter runs it.
   workload matches. Production asks once, with a y/N.
 - **`klogs`**: follow logs in a split. The picker lists the namespace's
   workloads first — all their pods merged into one stream, and the new ones
-  join after a rollout — then single pods. `klogs -A` follows workloads on
-  several clusters at once (mark them), each line tagged with its cluster.
+  join after a rollout — then single pods. `klogs -A` lists the workloads and
+  pods of every cluster: mark any mix and they follow in one stream, each
+  line tagged with its source.
   `-g REGEX` keeps only matching lines (highlighted) and `-s 1h` starts an
-  hour back.
+  hour back. Cluster URLs in the logs are clickable from your machine:
+  `http://grafana.monitoring.svc.cluster.local:3000/…` opens that service, and
+  a pod's own `Listening on http://0.0.0.0:8080` opens that pod. The text stays
+  as logged; the link goes to a localhost port the log pane holds, and
+  `kubectl port-forward` only starts when you click.
 - **`kgrep`**: `klogs` that searches — pick a workload or pod, then type what
   to look for; it keeps following, so new matches keep coming. `kgrep timeout`
   skips the question, `kgrep -A` works across clusters.
 - Splits you only watch (logs, port-forwards, `kwhy`'s answer) open without
   taking the focus, so you keep typing in your shell; the ones you type in
   (`kexec`, `knode`, `knet`, `kask`) take it.
-- **`kexec`**, **`kpf`**: pick a pod or service and open a shell in it, or
-  port-forward it — in a split next to your shell.
+- **`kexec`**, **`kpf`**: pick a pod or service and open a shell in it (in a
+  split next to your shell), or port-forward it. `kpf` holds a free local
+  port in the background and prints how to use it: the URL, and for
+  Postgres, MySQL, Redis, Mongo or gRPC the client command. `kubectl
+  port-forward` only runs while something is connected (it stops after 10
+  minutes idle and starts again on the next connection). `kpf -A` lists the
+  services of every cluster; `kpf -A grafana` starts the only match.
+  `kexec -A` picks a pod on any cluster.
   `kpf -l` lists the running port-forwards: open, copy the URL or stop one
   (they also show in the Kube Context menu bar). Favorites from the config
   (`forwards:`): `kpf grafana` starts it and opens the browser — or just the
@@ -374,16 +391,18 @@ from the context name.
 | `kflux` | Flux resources on this pane's cluster |
 | `kwhy [filter]` | ask Claude why a pod is unhealthy |
 | `kstatus [-w]` | cluster health on one screen (`-w`: refresh every 30s) |
-| `kjobs [-n] [failed\|running\|done\|suspended\|cron] [filter]` | Jobs and CronJobs; enter: logs, run now, rerun, suspend/resume, delete |
+| `kjobs [-n\|-A] [failed\|running\|done\|suspended\|cron] [filter]` | Jobs and CronJobs (`-A`: every cluster); enter: logs, run now, rerun, suspend/resume, delete |
 | `krun [-c container] [name] [-- CMD...]` | pick workloads on any cluster, run CMD in all their pods |
 | `kask [filter]` / `cmd \| kask` | pick the whole cluster or a pod (or pipe output in) and talk to Claude about it (`--dump`: just save the file) |
 | `kver [-d] [filter]` | image tag of every workload on every cluster (`-d`: only where they differ) |
 | `kdiff [filter]` | compare a workload's spec between two clusters |
 | `kroll [filter]` | pick workloads on any cluster, `rollout restart` them and follow the rollouts |
 | `knode [filter]` | shell on a node of this pane's cluster, in a split (`kubectl debug node`) |
-| `kfail [-n] [filter]` | failing pods (all namespaces; `-n` this namespace) with events and last logs; enter: logs, why, ask, shell, describe |
+| `kpods [failing] [filter]` | the pods of every cluster, the ones needing attention first (`failing`: only those); enter: logs, why, ask, shell, describe |
+| `kfail [-n\|-A] [filter]` | failing pods (all namespaces; `-n` this namespace; `-A` every cluster) with events and last logs; enter: logs, why, ask, shell, describe |
 | `kwarn [-n]` | stream Warning events (all namespaces; `-n` this namespace) |
-| `klogs [-A] [filter]` | follow a workload's pods (merged) or one pod in a split; `-A`: workloads on several clusters |
+| `kwarn -A [cluster…]` | Warning events of every cluster (or the ones named) in one stream, each line led by its cluster |
+| `klogs [-A] [filter]` | follow a workload's pods (merged) or one pod in a split; `-A`: workloads and pods of every cluster, marked together in one stream |
 | `kgrep [-A] [pattern]` | search the logs of a workload or pod (asks the pattern after the pick) |
 | `kjunk [debug\|pods\|jobs\|pv] [filter]` | leftovers on every cluster: mark and delete |
 | `kcron [duration] [filter]` | upcoming CronJob runs on every cluster (default 6h) |
@@ -396,8 +415,9 @@ from the context name.
 | `kpf NAME` · `kpf -f` | a favorite port-forward: start it (if needed) and open the browser |
 | `kwhat [duration] [filter]` | what changed on every cluster (default the last hour) |
 | `knet` | network toolbox pod in this namespace, in a split |
-| `kexec [filter]` | shell into a pod in a split |
-| `kpf [-n] [filter]` | port-forward a service in a split, on a free local port (every namespace, this pane's first; `-n`: only it) |
+| `kexec [-A] [filter]` | shell into a pod in a split (`-A`: a pod of any cluster) |
+| `kpf [-n] [filter]` | port-forward a service on a free local port, kubectl only while in use (every namespace, this pane's first; `-n`: only it) |
+| `kpf -A [filter]` | the same, with the services of every cluster; starts right away when the filter matches one service |
 | `kpf -l` | running port-forwards: open, copy the URL, save as a favorite, stop |
 | `rex8s use-context CTX` | set the machine's default context (what `kubectl` uses outside rex8s panes) |
 | `REX8S_FORCE=1 kubectl ...` | skip the production confirmation (scripts) |

@@ -103,8 +103,12 @@ func (a *app) kfail(args []string) error {
 	if err != nil || it == nil {
 		return err
 	}
-	p := pods[it.Key]
+	return a.podAction(c, cl, pods[it.Key], pause)
+}
 
+// podAction: what to do with a pod — logs / why / ask / shell / describe /
+// events (kfail, kpods). pause runs after output that would scroll away.
+func (a *app) podAction(c kube.Context, cl kube.Client, p pod, pause func()) error {
 	actions := []tui.Item{
 		{Key: "logs", Label: fmt.Sprintf("%-9s", "logs"), Hint: "follow the logs in a split"},
 		{Key: "why", Label: fmt.Sprintf("%-9s", "why"), Hint: "ask Claude why it is unhealthy (kwhy)"},

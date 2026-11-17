@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,9 +21,10 @@ import (
 )
 
 type svcPort struct {
-	Name     string
-	Port     int
-	Protocol string
+	Name        string
+	Port        int
+	Protocol    string
+	AppProtocol string
 }
 
 type service struct {
@@ -44,9 +44,10 @@ func parseServices(data []byte) ([]service, error) {
 			Spec struct {
 				Type  string `json:"type"`
 				Ports []struct {
-					Name     string `json:"name"`
-					Port     int    `json:"port"`
-					Protocol string `json:"protocol"`
+					Name        string `json:"name"`
+					Port        int    `json:"port"`
+					Protocol    string `json:"protocol"`
+					AppProtocol string `json:"appProtocol"`
 				} `json:"ports"`
 			} `json:"spec"`
 		} `json:"items"`
@@ -59,7 +60,7 @@ func parseServices(data []byte) ([]service, error) {
 		s := service{Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Type: it.Spec.Type}
 		for _, p := range it.Spec.Ports {
 			if p.Protocol == "" || p.Protocol == "TCP" { // port-forward is TCP only
-				s.Ports = append(s.Ports, svcPort{Name: p.Name, Port: p.Port, Protocol: "TCP"})
+				s.Ports = append(s.Ports, svcPort{Name: p.Name, Port: p.Port, Protocol: "TCP", AppProtocol: p.AppProtocol})
 			}
 		}
 		if len(s.Ports) > 0 {
@@ -97,10 +98,14 @@ func freePort(want int) int {
 }
 
 // kpf: pick a service (and port) — every namespace, this pane's first; -n
-// only this namespace — and port-forward it in a pane next to this one. kpf -l lists the running ones; kpf --stop
-// PID stops one (for Raycast).
+// only this namespace; -A every cluster — and port-forward it in a pane next
+// to this one. kpf -l lists the running ones; kpf --stop PID stops one (for
+// Raycast).
 func (a *app) kpf(args []string) error {
 	filter, onlyNS := "", false
+	if len(args) > 0 && args[0] == "-A" {
+		return a.kpfAll(strings.Join(args[1:], " "))
+	}
 	if len(args) > 0 && args[0] == "-n" {
 		onlyNS, args = true, args[1:]
 	}
@@ -205,14 +210,18 @@ func (a *app) kpf(args []string) error {
 	if err != nil || it == nil {
 		return err
 	}
-	s := svcs[it.Key]
-	ns := s.Namespace
+	return a.kpfStart(c, svcs[it.Key])
+}
 
+// kpfStart asks for the port when the service has several, then starts the
+// forward on a free local port: in a pane next to this one, or here outside Rex.
+func (a *app) kpfStart(c kube.Context, s service) error {
+	ns := s.Namespace
 	port := s.Ports[0]
 	if len(s.Ports) > 1 {
 		opts := make([]tui.Item, len(s.Ports))
 		for i, p := range s.Ports {
-			opts[i] = tui.Item{Key: strconv.Itoa(i), Label: fmt.Sprintf("%-6d", p.Port), Hint: p.Name}
+			opts[i] = tui.Item{Key: strconv.Itoa(i), Label: fmt.Sprintf("%-6d", p.Port), Hint: strings.TrimSpace(p.Name + "  " + string(detectKind(p)))}
 		}
 		ch, err := tui.Run(tui.Options{Title: "Port of " + s.Name, Items: opts})
 		if err != nil || ch == nil {
@@ -222,18 +231,7 @@ func (a *app) kpf(args []string) error {
 		port = s.Ports[i]
 	}
 
-	local := freePort(port.Port)
-	mapping := fmt.Sprintf("%d:%d", local, port.Port)
-	if rex.Block() == "" {
-		return a.pftail(c.Name, ns, s.Name, mapping)
-	}
-	argv := []string{filepath.Join(a.binDir, "rex8s"), "pftail", c.Name, ns, s.Name, mapping}
-	if err := rex.SplitBehind(fmt.Sprintf("pf %s :%d", s.Name, local), argv...); err != nil {
-		return err
-	}
-	fmt.Printf("port-forward %s → %s\n", tui.Bold.Render("svc/"+s.Name+":"+strconv.Itoa(port.Port)),
-		tui.Ok.Render(fmt.Sprintf("localhost:%d", local)))
-	return nil
+	return a.lazyStart(c, ns, s.Name, port)
 }
 
 // pftail runs the port-forward in its own pane until closed.

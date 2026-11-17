@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/vitalbh/rex8s/internal/guard"
 	"github.com/vitalbh/rex8s/internal/rex"
@@ -13,24 +14,41 @@ import (
 )
 
 // kexec: pick a pod (and container) and open a shell in it, in a pane next
-// to this one.
-func (a *app) kexec(filter string) error {
+// to this one. kexec -A [FILTER]: a pod of any cluster.
+func (a *app) kexec(args []string) error {
+	filter := ""
+	if len(args) > 0 && args[0] == "-A" {
+		cp, _, err := a.pickPodAll("Shell · pods", false, strings.Join(args[1:], " "))
+		if err != nil || cp == nil {
+			return err
+		}
+		return a.shellIn(cp.c.Name, cp.p)
+	}
+	if len(args) > 0 {
+		filter = args[0]
+	}
 	sel, err := a.pickPod("Shell", filter)
 	if err != nil || sel == nil {
 		return err
 	}
-	container, ok, err := pickContainer(sel.pod, false)
+	return a.shellIn(sel.ctx.Name, sel.pod)
+}
+
+// shellIn asks for the container when there are several, then opens the
+// shell in a split (here outside Rex). Production asks first (exectail).
+func (a *app) shellIn(ctxName string, p pod) error {
+	container, ok, err := pickContainer(p, false)
 	if err != nil || !ok {
 		return err
 	}
 	if rex.Block() == "" {
-		return a.exectail(sel.ctx.Name, sel.ns, sel.pod.Name, container)
+		return a.exectail(ctxName, p.Namespace, p.Name, container)
 	}
-	argv := []string{filepath.Join(a.binDir, "rex8s"), "exectail", sel.ctx.Name, sel.ns, sel.pod.Name}
+	argv := []string{filepath.Join(a.binDir, "rex8s"), "exectail", ctxName, p.Namespace, p.Name}
 	if container != "" {
 		argv = append(argv, container)
 	}
-	return rex.Split("exec "+sel.pod.Name, argv...)
+	return rex.Split("exec "+p.Name, argv...)
 }
 
 // exectail runs `kubectl exec -it` (bash when the image has it, else sh). In

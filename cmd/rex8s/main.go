@@ -110,6 +110,9 @@ func newApp() (*app, error) {
 }
 
 func (a *app) dispatch(cmd string, args []string) error {
+	if sub, ok := wrapperCmds[cmd]; ok { // rex8s klogs = klogs = rex8s logs
+		cmd = sub
+	}
 	arg := func(i int) string {
 		if i < len(args) {
 			return args[i]
@@ -223,6 +226,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.fdiff(args)
 	case "kpf":
 		return a.kpf(args)
+	case "pfbg":
+		return a.pfbg(args)
 	case "kauth":
 		return a.kauth(args)
 	case "list":
@@ -235,7 +240,12 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.kstatus(args)
 	case "kjobs":
 		return a.kjobs(args)
+	case "kpods":
+		return a.kpods(args)
 	case "kfail":
+		if len(args) > 0 && args[0] == "-A" { // kpods failing
+			return a.kpods(append([]string{"failing"}, args[1:]...))
+		}
 		return a.kfail(args)
 	case "use-context":
 		if err := need(1); err != nil {
@@ -243,7 +253,7 @@ func (a *app) dispatch(cmd string, args []string) error {
 		}
 		return a.useContext(args[0])
 	case "kexec":
-		return a.kexec(arg(0))
+		return a.kexec(args)
 	case "kwhat":
 		return a.kwhat(args)
 	case "khelp":
