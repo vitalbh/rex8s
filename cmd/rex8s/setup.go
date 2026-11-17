@@ -334,7 +334,7 @@ func (a *app) doctor(args []string) error {
 	}
 	check(missing+stale == 0, false, fmt.Sprintf("%d commands (k*, kubectl/helm/flux guard)", len(wrapperNames())),
 		map[bool]string{true: "", false: fmt.Sprintf("%d missing, %d outdated: rex8s setup", missing, stale)}[missing+stale == 0])
-	check(onPath(dir), true, "on this shell's PATH", map[bool]string{true: "", false: "only rex8s panes have them; see README › In any shell"}[onPath(dir)])
+	check(onPath(dir), true, "on this shell's PATH", map[bool]string{true: "", false: "only rex8s panes have them; see docs/configuration.md › In any shell"}[onPath(dir)])
 
 	section("Rex")
 	rb := findRex()

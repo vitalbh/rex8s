@@ -16,7 +16,7 @@ type helpEntry struct {
 }
 
 // helpEntries: every command a rex8s pane has, grouped. Keep in sync with
-// scripts/wrappers.sh and the README.
+// scripts/wrappers.sh and docs/commands.md.
 var helpEntries = []helpEntry{
 	{"pane", "kctx", "kctx [CTX]", "switch this pane's cluster", []string{"No argument: picker. Only this pane changes; other tabs and ~/.kube/config stay."}},
 	{"pane", "kns", "kns [NS|all]", "switch this pane's namespace", []string{"No argument: picker. kns all: every namespace — kubectl get/describe/top", "add -A by themselves, commands on one object ask for -n."}},
