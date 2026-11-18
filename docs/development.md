@@ -27,6 +27,40 @@ invalidated ("already claimed by another client").
 terminals that don't answer — unacceptable in a wrapper that runs on every
 `kubectl`.
 
+`kview`'s tabs don't run `kubectl` on every refresh: `internal/kwatch`
+watches them with client-go informers, one per cluster and kind, built from
+the same kubeconfig (exec credential plugins run once per token, not once
+per refresh, with no terminal and their stderr discarded). It answers the
+tabs' kubectl queries (`get pods -A -o json`) with the same JSON, so the
+parsers are shared; changes wake the tab. The `:` tabs (`get KIND -o wide
+-A`) are watched as tables: kwatch finds the kind by discovery, lists and
+watches it with `Accept: as=Table` and `includeObject=Metadata` (the API
+server prints each row, a CRD's printer columns too), keeps one object per
+row in an informer, and prints them as kubectl would — `NAMESPACE` first,
+the wide columns, ages counted on from when each row came — so the same
+table parser reads either. A cluster it can't build a client for (a legacy
+`auth-provider`), a kind a cluster doesn't have or can't print as a table,
+demo mode and `watch: false` (`kview_watch`, its old name, still works) go
+through `kubectl` as before, and the status line names the clusters polled
+that way (`Hub.Watching`). A watch nothing served for 5 minutes (a hidden
+tab) stops, and the next read starts it again; a `:` tab another replaces
+releases its watches (`Hub.Release`). Client-go retries a refused watch
+quietly, so kwatch watches its own connections: when they fail for 10s the
+tab says `unreachable` rather than show old rows as current. The same
+client reads CPU and memory (`metrics.k8s.io` can't be watched: a list
+every 30s, node percentages of allocatable from the nodes watch) and **y**
+renders the object the watch holds; where kwatch has no client, `kubectl
+top` and `kubectl get -o yaml` read them.
+
+The views that use it get their hub from `app.watchHub` (gated the same
+way, set as the `fleet.Reader`'s `Source`): kview, and `kwarn -A`, which
+reads `get events -A --field-selector type=Warning` from it and prints what
+changed since its last read, woken by `Hub.Notify` (and every 15s, so a
+cluster that went away shows). The pickers (`kpods`, `kfail`, `kjobs -A`…)
+read once and don't refresh: a watch's first list costs what `kubectl`
+does, so they keep `kubectl`. Single-cluster `kwarn` is one `kubectl get
+-w` already.
+
 Port-forwards (`kpf`, the links in the logs) are a local listener that starts
 `kubectl port-forward` on a port of its own at the first connection and copies
 the bytes; `kpf`'s run as a background `rex8s _pf` process registered in

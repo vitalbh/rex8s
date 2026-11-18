@@ -62,3 +62,34 @@ func TestGuardAndWrappers(t *testing.T) {
 		t.Errorf("read %+v", c)
 	}
 }
+
+// watch is on by default; kview_watch, its old name, still turns it off,
+// and watch wins when both are written.
+func TestWatchOn(t *testing.T) {
+	var none *Config
+	if !none.WatchOn() || !(&Config{}).WatchOn() {
+		t.Fatal("watch is on by default")
+	}
+	for _, tc := range []struct {
+		yaml string
+		on   bool
+	}{
+		{"watch: false\n", false},
+		{"kview_watch: false\n", false},
+		{"kview_watch: false\nwatch: true\n", true},
+		{"kview_watch: true\nwatch: false\n", false},
+	} {
+		p := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(p, []byte(tc.yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("REX8S_CONFIG", p)
+		c, err := Load()
+		if err != nil || len(c.Warnings) != 0 {
+			t.Fatalf("%q: %v %q", tc.yaml, err, c.Warnings)
+		}
+		if c.WatchOn() != tc.on {
+			t.Errorf("%q: WatchOn() = %v", tc.yaml, c.WatchOn())
+		}
+	}
+}

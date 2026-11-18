@@ -2,7 +2,9 @@ package kube
 
 import (
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -158,4 +160,24 @@ func groupRank(g string) int {
 		return 2
 	}
 	return 3
+}
+
+// ParseAge reads kubectl's AGE: "45s", "12m", "5h3m", "4d", "2y110d".
+func ParseAge(s string) (time.Duration, bool) {
+	units := map[byte]time.Duration{'s': time.Second, 'm': time.Minute, 'h': time.Hour, 'd': 24 * time.Hour, 'y': 365 * 24 * time.Hour}
+	var total time.Duration
+	num := ""
+	for i := 0; i < len(s); i++ {
+		switch ch := s[i]; {
+		case ch >= '0' && ch <= '9':
+			num += string(ch)
+		case units[ch] != 0 && num != "":
+			n, _ := strconv.Atoi(num)
+			total += time.Duration(n) * units[ch]
+			num = ""
+		default:
+			return 0, false
+		}
+	}
+	return total, num == "" && s != ""
 }

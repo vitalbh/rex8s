@@ -23,6 +23,14 @@ type Item struct {
 	// (PROD)". The browser asks "delete <Name>?" before a Confirm action;
 	// without it, it falls back to the label.
 	Name string
+	// Sig, in the browser, is what of the row matters when it changes
+	// (status, ready, restarts: not an age that ticks). A refresh that
+	// changes it highlights the row for a few seconds, as it does a new row;
+	// rows without one are highlighted only when new.
+	Sig string
+	// Hidden rows of a browser tab show only under a Result.Only that
+	// accepts them (a drill-in): a CronJob's runs, under it.
+	Hidden bool
 }
 
 // Options configures a picker.

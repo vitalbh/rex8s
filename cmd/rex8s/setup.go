@@ -455,6 +455,8 @@ func (a *app) doctor(args []string) error {
 	a.doctorTools(d)
 	d.section("config")
 	a.doctorConfig(d)
+	d.section("shell")
+	doctorShell(d)
 	d.section("agents")
 	for _, s := range agentSkillDirs() {
 		d.check(s.state == "current", true, "skill in "+tildePath(s.dir), map[string]string{"current": "", "outdated": "rex8s agents install", "missing": "rex8s agents install (optional)"}[s.state])

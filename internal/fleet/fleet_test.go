@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"errors"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -256,5 +257,45 @@ func TestOptionalQuery(t *testing.T) {
 		func(kube.Context, [][]byte) ([]string, error) { return nil, nil })
 	if len(res.Skipped) != 1 {
 		t.Errorf("a required query that fails should skip the cluster: %+v", res)
+	}
+}
+
+// fakeSource answers the clusters it knows; the others go to kubectl.
+type fakeSource map[string]struct {
+	out string
+	err error
+}
+
+func (f fakeSource) Serve(c kube.Context, _ []string) ([]byte, bool, error) {
+	a, ok := f[c.Name]
+	if !ok {
+		return nil, false, nil
+	}
+	return []byte(a.out), true, a.err
+}
+
+// A Source answers what it can, without kubectl or a probe; its errors skip
+// the cluster like kubectl's; what it doesn't answer, kubectl reads.
+func TestReadFromSource(t *testing.T) {
+	cl, count := fakeKubectl(t)
+	r := &Reader{Client: cl, Probe: time.Second, Source: fakeSource{
+		"watched": {out: `{"items":[{"metadata":{"name":"w-1","namespace":"x"}},{"metadata":{"name":"w-2","namespace":"x"}}]}`},
+		"denied":  {err: errors.New("Unauthorized")},
+		"down":    {err: errors.New("unreachable (10.0.0.1:443)")},
+	}}
+	clusters := []kube.Context{
+		{Name: "watched", Short: "use", Server: "https://127.0.0.1:1"}, // a probe would fail it
+		{Name: "denied", Short: "euw"}, {Name: "down", Short: "sa"}, {Name: "ok-1", Short: "stg"},
+	}
+	res := Read(r, clusters, podQuery, pods)
+	if res.OK != 2 || len(res.Rows) != 3 || res.Rows[0].V.Name != "w-1" || res.Rows[2].C.Short != "stg" {
+		t.Fatalf("rows = %+v", res)
+	}
+	if n := count(); n != 1 {
+		t.Errorf("kubectl ran %d times, want 1 (ok-1 only)", n)
+	}
+	got := strings.Join(res.Strings(), " | ")
+	if got != "euw: login expired (kauth euw) | sa: unreachable (10.0.0.1:443)" || !res.Skipped[0].Expired {
+		t.Errorf("skipped = %q", got)
 	}
 }

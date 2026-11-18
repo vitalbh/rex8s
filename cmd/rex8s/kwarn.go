@@ -111,26 +111,37 @@ func streamWarnings(r io.Reader, w io.Writer, showNS bool, seen *warnSeen) {
 			}
 			return
 		}
-		when, count := e.When(), e.Count
-		if e.Series != nil {
-			count = e.Series.Count
-		}
-		if !seen.show(e.Metadata.UID, when, count) {
-			continue
-		}
-		obj := kube.ShortKind(e.InvolvedObject.Kind) + "/" + e.InvolvedObject.Name
-		if showNS {
-			obj = e.Metadata.Namespace + " " + obj
-		}
-		reps := ""
-		if count > 1 {
-			reps = tui.Dim.Render(fmt.Sprintf(" x%d", count))
-		}
-		fmt.Fprintf(w, "%s %s %s%s %s\n",
-			tui.Dim.Render(when.Local().Format("15:04:05")),
-			tui.Warn.Render(oneLine(tui.Clean(e.Reason))), oneLine(tui.Clean(obj)), reps,
-			truncate(oneLine(tui.Clean(e.Message)), 240))
+		printWarning(w, e, showNS, seen)
 	}
+}
+
+// warnCount is how often the event occurred (its series' count, when it is
+// part of one).
+func warnCount(e kube.Event) int {
+	if e.Series != nil {
+		return e.Series.Count
+	}
+	return e.Count
+}
+
+// printWarning prints e as a line, when seen says to.
+func printWarning(w io.Writer, e kube.Event, showNS bool, seen *warnSeen) {
+	when, count := e.When(), warnCount(e)
+	if !seen.show(e.Metadata.UID, when, count) {
+		return
+	}
+	obj := kube.ShortKind(e.InvolvedObject.Kind) + "/" + e.InvolvedObject.Name
+	if showNS {
+		obj = e.Metadata.Namespace + " " + obj
+	}
+	reps := ""
+	if count > 1 {
+		reps = tui.Dim.Render(fmt.Sprintf(" x%d", count))
+	}
+	fmt.Fprintf(w, "%s %s %s%s %s\n",
+		tui.Dim.Render(when.Local().Format("15:04:05")),
+		tui.Warn.Render(oneLine(tui.Clean(e.Reason))), oneLine(tui.Clean(obj)), reps,
+		truncate(oneLine(tui.Clean(e.Message)), 240))
 }
 
 // warnSeen remembers the Warning events already shown: an event comes back

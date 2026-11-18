@@ -215,3 +215,45 @@ func TestBrowserCommandSuggestionList(t *testing.T) {
 		t.Fatalf("enter opened %q, want the highlighted cronjobs", typed)
 	}
 }
+
+// A View.Wake loads the tab again (or, hidden, marks it to load when
+// shown); a Wake of a tab since replaced does nothing; the status says
+// "live" instead of the time.
+func TestBrowserWake(t *testing.T) {
+	wake := make(chan struct{}, 1)
+	loads := 0
+	count := func(func([]Item)) ([]Item, error) { loads++; return nil, nil }
+	b := newBrowser(BrowserOptions{Title: "t", Views: []View{
+		{Name: "pods", Load: count, Wake: wake},
+		{Name: "svc", Load: noLoad, Wake: make(chan struct{}, 1)},
+	}})
+	b.tabs[0].gen = 1
+	b = loaded(b, 0, Item{Key: "a", Label: "app/api-1"})
+	if !b.tabs[0].waking || !strings.Contains(b.View(), "1 rows · live") {
+		t.Fatalf("waking %v:\n%s", b.tabs[0].waking, b.View())
+	}
+	m, cmd := b.Update(wakeMsg{0, wake})
+	b = m.(browser)
+	if !b.tabs[0].loading || cmd == nil {
+		t.Fatal("a wake did not load the tab")
+	}
+	m, _ = b.Update(wakeMsg{1, b.o.Views[1].Wake})
+	if b = m.(browser); !b.tabs[1].stale || b.tabs[1].loading {
+		t.Fatal("a hidden tab's wake should mark it stale")
+	}
+	m, cmd = b.Update(wakeMsg{1, make(chan struct{})})
+	if b = m.(browser); cmd != nil {
+		t.Fatal("a wake from another channel was taken")
+	}
+
+	// wakeOn ends when the channel closes
+	done := make(chan struct{})
+	close(done)
+	if msg := wakeOn(0, done)(); msg != nil {
+		t.Fatalf("closed: %v", msg)
+	}
+	wake <- struct{}{}
+	if msg, ok := wakeOn(0, wake)().(wakeMsg); !ok || msg.tab != 0 {
+		t.Fatalf("got %v", msg)
+	}
+}

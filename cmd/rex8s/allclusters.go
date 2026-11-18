@@ -8,6 +8,7 @@ import (
 	"github.com/vitalbh/rex8s/internal/demo"
 	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
+	"github.com/vitalbh/rex8s/internal/kwatch"
 	"github.com/vitalbh/rex8s/internal/tui"
 	"golang.org/x/term"
 )
@@ -34,6 +35,25 @@ func (a *app) readerFor(cl kube.Client) *fleet.Reader {
 		r.Probe = clusterProbe
 	}
 	return r
+}
+
+// watchHub is a kwatch.Hub on cl's kubeconfig: the live views read what it
+// can answer from watches on the API server instead of running kubectl
+// again and again. With r, it is r's Source. Nil in demo mode (its clusters
+// are fake: kubectl it is) and with watch: false; stop ends the watches
+// (and does nothing without a hub).
+func (a *app) watchHub(cl kube.Client, r *fleet.Reader) (hub *kwatch.Hub, stop func()) {
+	if demo.Active() || !a.cfg.WatchOn() {
+		return nil, func() {}
+	}
+	hub = kwatch.New(cl.Kubeconfig)
+	if cl.Timeout > 0 {
+		hub.FirstWait = cl.Timeout
+	}
+	if r != nil {
+		r.Source = hub
+	}
+	return hub, hub.Stop
 }
 
 // readAll runs the queries on every cluster at once, with a "reading WHAT

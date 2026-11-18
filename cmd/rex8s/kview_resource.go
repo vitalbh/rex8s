@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -183,6 +182,9 @@ func (k *kview) complete(prefix string) []string {
 // all).
 func (k *kview) openResource(r kube.APIResource, only func(tui.Item) bool, onlyLabel string) tui.Result {
 	k.keep(nil, "res|") // the kind shown before
+	if k.hub != nil {
+		k.dropWakes("res:") // its watches too
+	}
 	v := k.resourceView(r)
 	return tui.Result{Open: &v, Only: only, OnlyLabel: onlyLabel}
 }
@@ -247,7 +249,7 @@ func (k *kview) resourceView(r kube.APIResource) tui.View {
 	if k.multi {
 		every = 30 * time.Second
 	}
-	return tui.View{Name: ":" + r.Name, Header: k.header(tab.view, "NAMESPACE/NAME"), Load: tab.loader(k), Every: every,
+	return tui.View{Name: ":" + r.Name, Wake: k.wake(tab.view), Live: k.live(tab.view), Header: k.header(tab.view, "NAMESPACE/NAME"), Load: tab.loader(k), Every: every,
 		Actions: []tui.Action{act("d", "describe"), act("y", "yaml"), many("ctrl+d", "delete")},
 		Sorts:   k.sorts(sortName, sortAge)}
 }
@@ -305,16 +307,21 @@ func resRows(k *kview, r kube.APIResource, kind string, read []kube.On[kvTableRo
 	for _, row := range read {
 		t := row.V
 		o := kvRes{c: row.C, res: r, ns: t.cell("NAMESPACE"), name: t.cell("NAME")}
-		if d, ok := parseKubeAge(t.cell("AGE")); ok {
+		if d, ok := kube.ParseAge(t.cell("AGE")); ok {
 			o.created = time.Now().Add(-d)
 		}
 		key := "res|" + r.Full() + "|" + row.C.Name + "|" + o.ref()
 		objs[key] = o
 		cells := make([]string, len(cols))
+		var sig []string // every column but the ages (AGE, LAST SEEN, DURATION…), which tick
 		for i, c := range cols {
 			cells[i] = t.cell(c)
+			if _, age := kube.ParseAge(cells[i]); !age {
+				sig = append(sig, cells[i])
+			}
 		}
-		items = append(items, tui.Item{Key: key, Label: k.row(row.C, line(ref(t), cells)), Name: kvName(row.C, kind, o.ref())})
+		items = append(items, tui.Item{Key: key, Label: k.row(row.C, line(ref(t), cells)), Name: kvName(row.C, kind, o.ref()),
+			Sig: strings.Join(sig, "\x00")})
 	}
 	return header, items, objs
 }
@@ -325,26 +332,6 @@ func padRunes(s string, w int) string {
 		return s + strings.Repeat(" ", w-n)
 	}
 	return s
-}
-
-// parseKubeAge reads kubectl's AGE: "45s", "12m", "5h3m", "4d", "2y110d".
-func parseKubeAge(s string) (time.Duration, bool) {
-	units := map[byte]time.Duration{'s': time.Second, 'm': time.Minute, 'h': time.Hour, 'd': 24 * time.Hour, 'y': 365 * 24 * time.Hour}
-	var total time.Duration
-	num := ""
-	for i := 0; i < len(s); i++ {
-		switch ch := s[i]; {
-		case ch >= '0' && ch <= '9':
-			num += string(ch)
-		case units[ch] != 0 && num != "":
-			n, _ := strconv.Atoi(num)
-			total += time.Duration(n) * units[ch]
-			num = ""
-		default:
-			return 0, false
-		}
-	}
-	return total, num == "" && s != ""
 }
 
 func (k *kview) resAction(v kvRes, key string) tui.Result {

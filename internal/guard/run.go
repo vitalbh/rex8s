@@ -31,6 +31,9 @@ func Run(tool string, args []string, skipDir string, cfg *config.Config) error {
 	if bin == "" {
 		return fmt.Errorf("%s not found in PATH", tool)
 	}
+	if msg := PaneDrift(); msg != "" { // before anything: the target below may not be the pane's
+		fmt.Fprintln(sys.stderr, msg)
+	}
 	if !cfg.GuardOn() {
 		return sys.exec(bin, append([]string{tool}, args...))
 	}

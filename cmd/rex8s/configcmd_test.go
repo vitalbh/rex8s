@@ -61,3 +61,32 @@ func TestConfigSetForwardExpire(t *testing.T) {
 		t.Errorf("expiry after set off = %v", d)
 	}
 }
+
+// kview_watch is watch's old name: config takes it for watch, writing
+// watch removes it, and get watch reads it while it is the one written.
+func TestConfigWatchOldName(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	os.WriteFile(path, []byte("kview_watch: false\n"), 0o644)
+	t.Setenv("REX8S_CONFIG", path)
+	cfg, _ := config.Load()
+	a := &app{cfg: cfg}
+	if v := a.configValue("watch"); v != "false" {
+		t.Errorf("get watch = %q", v)
+	}
+	if err := a.configCmd([]string{"set", "kview_watch", "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "watch: true\n" {
+		t.Errorf("file = %q", b)
+	}
+	if !a.cfg.WatchOn() {
+		t.Error("watch off after set true")
+	}
+	os.WriteFile(path, []byte("kview_watch: false\n"), 0o644)
+	if err := a.configCmd([]string{"unset", "watch"}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "watch") {
+		t.Errorf("file = %q", b)
+	}
+}

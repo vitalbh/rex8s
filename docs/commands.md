@@ -85,9 +85,16 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
 
 **`kview [-A [GROUP | CLUSTER,…] | --context CTX] [pods|workloads|services|jobs|nodes|warnings]`** —
 the cluster in one screen, like k9s: a tab per kind of object (**tab** or
-**1–6** switch), each list refreshing by itself, and the cursor staying on its
-row as it does. **`/`** filters (every word, any column; **esc** clears), **R**
-reloads, **?** lists every key, **q** quits. `-A` lists every cluster's,
+**1–6** switch), each list live — it watches the API server, so a pod that
+starts, crashes or goes shows within a second — and the cursor staying on its
+row as it does. A row that just appeared (**+**) or changed (**~**: status,
+ready, restarts; not an age ticking) is highlighted for a few seconds. The
+status line says `live`; `live · polling sa` when some clusters are read
+with `kubectl` on every refresh instead (a legacy `auth-provider` login, a
+kind that cluster doesn't have). A tab you haven't looked at for 5 minutes
+stops its watches, and starts them again when you go back to it. **`/`**
+filters (every word, any column; **esc** clears), **R** reloads, **?**
+lists every key, **q** quits. `-A` lists every cluster's,
 production in red; `-A prod` only a group of the config (`groups: {prod:
 [use, euw]}`), `-A use,euw` only the clusters named (`kview -A use euw nodes`
 works too).
@@ -97,7 +104,7 @@ works too).
 | pods | **enter** its owner · **l** logs · **p** previous logs · **s** shell · **d** describe · **e** events · **y** YAML · **w** why · **a** ask · **ctrl+d** delete |
 | workloads | **enter** its pods · **l** logs of all its pods · **r** restart · **d** describe · **y** YAML |
 | services | **enter** port-forward in the background (as `kpf`), and the browser opens for HTTP · **o** its pods · **d** describe · **y** YAML |
-| jobs | **l** logs · **r** run a CronJob now / rerun a Job · **d** describe · **y** YAML |
+| jobs | **enter** a CronJob's runs, a Job's pods · **l** logs (a CronJob: of its last run) · **r** run a CronJob now / rerun a Job · **d** describe · **y** YAML |
 | nodes | **enter** its pods · **s** shell on the node · **d** describe · **y** YAML |
 | warnings | **enter** go to the object · **d** describe it |
 | `:KIND` | **d** describe · **y** YAML · **ctrl+d** delete |
@@ -109,9 +116,17 @@ list shows every kind whose name, short name or Kind contains it, by full name
 (`map` finds `configmaps (cm)`); **↑↓** choose, **tab** completes, **enter**
 opens the highlighted one (from `kubectl api-resources`).
 It shows the columns the API server prints for that kind (`kubectl get -o
-wide`: a CRD's printer columns too), with `-A` too, and the filter, marks and
+wide`: a CRD's printer columns too), with `-A` too, live like the other tabs
+(the API server prints the rows of a watch), and the filter, marks and
 sorting work as on the other tabs; **esc** goes back to the fixed tabs. `:po`,
 `:deploy`, `:svc`, `:no`… go to their own tab.
+
+**Jobs.** One row per CronJob — schedule, its last run (how it went, how
+long ago), the next one, how many run now — and per Job of its own, failing
+first (a CronJob whose last run failed, a Job that failed), then running. A
+CronJob's runs, most of a cluster's Jobs, stay out of the list: **enter** on
+it shows them, newest first (**esc** back); a pod's **enter** still reaches
+its Job there.
 
 **Following links.** **enter** on a pod goes to its workload (through its
 ReplicaSet to the Deployment; or its StatefulSet, DaemonSet, Job), on a node
@@ -137,8 +152,15 @@ container (`logs --previous`): why a pod in CrashLoopBackOff died.
 first), **S** status (failing first), **T** restarts, **C** CPU, **M** memory
 (the most first); the same key again reverses, and the header says the sort
 (`[sort: restarts ↓]`). Pods and nodes show CPU and memory from
-metrics-server (`kubectl top`), read at most every 30s per cluster; without
-metrics-server the columns show `-` (asked again after 5 minutes).
+metrics-server (the metrics API, as `kubectl top` reads it), read at most
+every 30s per cluster; without metrics-server the columns show `-` (asked
+again after 5 minutes).
+
+**y** on a main tab shows the object as the tab's watch holds it, at once;
+the viewer's title says `watched, without last-applied`: the
+`kubectl.kubernetes.io/last-applied-configuration` annotation (and managed
+fields, which `kubectl get -o yaml` hides too) aren't kept. Where there is
+no watch (`watch: false`, a cluster kwatch has no client for), it runs `kubectl get -o yaml`.
 
 Logs and shells open in Rex splits (outside Rex, in place); describe, events
 and YAML open in a viewer (**q** back), cleaned of escape sequences. A second
@@ -181,7 +203,11 @@ use/payments`, `kview PROD all`, `kview PROD all:use,euw`.
   pulls), deduplicated. Also the bottom pane of the ⇧⌘K layout. The Rex tab
   says how many came in the last 10 minutes.
   **`kwarn -A [cluster…]`**: every cluster's (or the ones named) in one
-  stream, each line led by its cluster.
+  stream, each line led by its cluster. It watches the clusters itself (one
+  connection each, like kview's tabs; `watch: false` runs `kubectl get -w`
+  per cluster instead), and a cluster that goes away says so once —
+  `watch failed (unreachable …); still trying` — and `watching again` when
+  it's back.
 - **`kjobs [-n|-A] [failed|running|done|suspended|cron] [filter]`** — Jobs and
   CronJobs, failed first, with logs and recent runs in the preview. Enter: run
   a CronJob now, rerun, suspend/resume, logs, delete.

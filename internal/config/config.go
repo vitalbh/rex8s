@@ -86,6 +86,13 @@ type Config struct {
 	// production cluster; kroll, krun, kview… too). Default true; false
 	// turns it off entirely. rex8s setup asks the first time at a terminal.
 	Guard *bool `json:"guard"`
+	// Watch: the live views (kview's main tabs, kwarn -A) follow the API
+	// server with watches (client-go) instead of running kubectl again and
+	// again. Default true; false goes back to kubectl.
+	Watch *bool `json:"watch"`
+	// KviewWatch is Watch's old name (kview_watch), still read; watch wins
+	// when both are set.
+	KviewWatch *bool `json:"kview_watch"`
 	// Wrappers: rex8s setup installs the k* commands (kview, klogs…).
 	// Default true; false installs none (rex8s kview still works).
 	Wrappers *bool `json:"wrappers"`
@@ -275,6 +282,20 @@ func (c *Config) LogLinksMode() string {
 // GuardOn reports whether the production guard is on (the default; a nil
 // config too).
 func (c *Config) GuardOn() bool { return c == nil || c.Guard == nil || *c.Guard }
+
+// WatchOn reports whether the live views watch the API server (the
+// default): watch, else its old name kview_watch.
+func (c *Config) WatchOn() bool {
+	switch {
+	case c == nil:
+		return true
+	case c.Watch != nil:
+		return *c.Watch
+	case c.KviewWatch != nil:
+		return *c.KviewWatch
+	}
+	return true
+}
 
 // WrappersOn reports whether setup installs the k* commands (the default).
 func (c *Config) WrappersOn() bool { return c == nil || c.Wrappers == nil || *c.Wrappers }

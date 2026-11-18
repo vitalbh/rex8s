@@ -22,7 +22,8 @@ import (
 // filters), and text results (describe, YAML…) open in a viewer. Space marks
 // rows for the actions that take many; ":" opens a tab of another kind
 // (BrowserOptions.Command); shift+letters sort; a Goto can be undone with
-// esc or backspace.
+// esc or backspace. Rows a refresh adds or changes light up for a few
+// seconds.
 
 // Action is a key that does something with the selected row.
 type Action struct {
@@ -58,8 +59,16 @@ type View struct {
 	// Load runs in the background and returns the tab's rows. While it runs
 	// it may call partial with the rows so far (all of them, not only the
 	// new ones): a view of many clusters shows each one as it answers.
-	Load    func(partial func([]Item)) ([]Item, error)
-	Every   time.Duration // refresh interval (0: only on R)
+	Load  func(partial func([]Item)) ([]Item, error)
+	Every time.Duration // refresh interval (0: only on R)
+	// Wake, when set, says the rows changed (a watch): the tab loads again
+	// soon after each send (sends close together load once), or, hidden,
+	// when it is shown. Closing it stops that.
+	Wake <-chan struct{}
+	// Live, when set, is what the status line says of a tab with Wake
+	// instead of "live" ("live · polling sa": not every cluster is
+	// watched); "" shows the time of the last load, as without Wake.
+	Live    func() string
 	Actions []Action
 	Sorts   []SortKey
 }
@@ -125,6 +134,8 @@ type tabState struct {
 	loading   bool      //
 	again     bool      // asked to load while loading: load once more when it ends
 	stale     bool      // its refresh came while hidden: load when it is shown
+	waking    bool      // waits on View.Wake
+	loadStart time.Time // when the running load started
 	loadedAt  time.Time // when the last load ended
 	gen       int
 	filter    string
@@ -137,7 +148,28 @@ type tabState struct {
 	marks     map[string]bool
 	sort      int // 1+index in View.Sorts; 0: as loaded
 	desc      bool
+	// seeded: a load ended well; from then on, the rows a load adds or
+	// changes (Item.Sig) light up for a while (lit, by Key).
+	seeded bool
+	lit    map[string]litRow
+	hides  bool // some rows are Hidden
 }
+
+// litRow is a row a refresh brought: since when, and whether it is new or
+// only changed.
+type litRow struct {
+	at    time.Time
+	isNew bool
+}
+
+// How long a row a refresh added or changed stays highlighted: strong at
+// first, then only its marker, then not at all. While any is lit the
+// browser redraws every fadeStep.
+const (
+	litStrong = 3 * time.Second
+	litFor    = 5 * time.Second
+	fadeStep  = time.Second
+)
 
 // What the keys do.
 const (
@@ -178,6 +210,8 @@ type browser struct {
 	choiceI int
 	history []navEntry
 	gens    *int // load generations, unique across tabs (an opened tab reuses an index)
+	fading  bool // a fadeMsg is on its way
+	now     func() time.Time
 	w, h    int
 }
 
@@ -199,8 +233,13 @@ type (
 		s        *loadStream
 	}
 	refreshMsg struct{ tab, gen int }
-	actionMsg  Result
-	execMsg    struct{ err error }
+	fadeMsg    struct{}
+	wakeMsg    struct {
+		tab int
+		ch  <-chan struct{}
+	}
+	actionMsg Result
+	execMsg   struct{ err error }
 )
 
 func newBrowser(o BrowserOptions) browser {
@@ -215,7 +254,7 @@ func newBrowser(o BrowserOptions) browser {
 	sp.Style = accent
 	o.Views = append([]View(nil), o.Views...) // an Open appends: never into the caller's array
 	b := browser{o: o, fixed: len(o.Views), tabs: make([]tabState, len(o.Views)), cur: o.Start, input: ti, cmdIn: ci, spin: sp,
-		gens: new(int), w: 100, h: 30}
+		gens: new(int), now: time.Now, w: 100, h: 30}
 	for i := range b.tabs {
 		b.tabs[i].marks = map[string]bool{}
 	}
@@ -275,7 +314,7 @@ func (b *browser) load(tab int) tea.Cmd {
 	}
 	t.gen = max(*b.gens, t.gen) + 1
 	*b.gens = t.gen
-	t.loading, t.stale, t.again = true, false, false
+	t.loading, t.stale, t.again, t.loadStart = true, false, false, time.Now()
 	gen, fn := t.gen, b.o.Views[tab].Load
 	s := newLoadStream()
 	run := func() tea.Msg {
@@ -286,12 +325,34 @@ func (b *browser) load(tab int) tea.Cmd {
 	return tea.Batch(run, s.next(tab, gen))
 }
 
+// wakeDelay gathers the changes a View.Wake reports close together into one
+// load.
+const wakeDelay = 500 * time.Millisecond
+
+// wakeOn waits for the next send on a View.Wake.
+func wakeOn(tab int, ch <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		if _, ok := <-ch; !ok {
+			return nil
+		}
+		time.Sleep(wakeDelay)
+		return wakeMsg{tab, ch}
+	}
+}
+
 // setItems takes a load's rows, sorted by the tab's sort. Once a load is
 // complete, marks of rows that are gone are dropped.
 func (b *browser) setItems(tab int, items []Item, final bool) {
 	t := &b.tabs[tab]
+	if t.seeded {
+		b.light(tab, t.raw, items)
+	}
 	t.raw = items
 	t.items = b.sorted(tab, items)
+	t.hides = slices.ContainsFunc(items, func(it Item) bool { return it.Hidden })
+	if final {
+		t.seeded = true
+	}
 	if final && len(t.marks) > 0 {
 		keep := map[string]bool{}
 		for _, it := range items {
@@ -301,6 +362,69 @@ func (b *browser) setItems(tab int, items []Item, final bool) {
 		}
 		t.marks = keep
 	}
+}
+
+// light marks the rows of items that old did not have, or had with another
+// Sig. By Key: rows that only moved (a sort, a neighbour gone) stay as they
+// are, and rows that went take their light with them.
+func (b *browser) light(tab int, old, items []Item) {
+	t := &b.tabs[tab]
+	sigs := make(map[string]string, len(old))
+	for _, it := range old {
+		if it.Key != "" {
+			sigs[it.Key] = it.Sig
+		}
+	}
+	lit := make(map[string]litRow, len(t.lit))
+	now := b.now()
+	for _, it := range items {
+		if it.Key == "" {
+			continue
+		}
+		sig, seen := sigs[it.Key]
+		switch {
+		case !seen:
+			lit[it.Key] = litRow{now, true}
+		case sig != it.Sig:
+			lit[it.Key] = litRow{now, false}
+		default:
+			if l, ok := t.lit[it.Key]; ok && now.Sub(l.at) < litFor {
+				lit[it.Key] = l
+			}
+		}
+	}
+	t.lit = lit
+}
+
+// litOf: how the row is highlighted now — on, strong, and whether it is new.
+func (b browser) litOf(it Item) (on, strong, isNew bool) {
+	l, ok := b.tabs[b.cur].lit[it.Key]
+	if !ok || it.Key == "" {
+		return false, false, false
+	}
+	age := b.now().Sub(l.at)
+	return age < litFor, age < litStrong, l.isNew
+}
+
+// fade drops the lights that are out and, while some are left, asks for
+// the next fadeMsg (one at a time): the rows dim and go back to normal
+// without a key or a refresh to redraw them.
+func (b *browser) fade() tea.Cmd {
+	now, left := b.now(), false
+	for i := range b.tabs {
+		for k, l := range b.tabs[i].lit {
+			if now.Sub(l.at) >= litFor {
+				delete(b.tabs[i].lit, k)
+			} else {
+				left = true
+			}
+		}
+	}
+	if !left || b.fading {
+		return nil
+	}
+	b.fading = true
+	return tea.Tick(fadeStep, func(time.Time) tea.Msg { return fadeMsg{} })
 }
 
 // sorted is items in the tab's sort order (a copy); rows without a Key
@@ -354,7 +478,7 @@ func (b browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t.key, t.cursor = "", 0
 		}
 		b.follow(msg.tab)
-		return b, msg.s.next(msg.tab, msg.gen)
+		return b, tea.Batch(msg.s.next(msg.tab, msg.gen), b.fade())
 
 	case loadedMsg:
 		if msg.tab >= len(b.tabs) {
@@ -375,14 +499,30 @@ func (b browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t.err = msg.err
 		}
 		b.follow(msg.tab)
+		wake := b.fade()
+		if ch := b.o.Views[msg.tab].Wake; ch != nil && !t.waking {
+			t.waking = true
+			wake = tea.Batch(wake, wakeOn(msg.tab, ch))
+		}
 		if t.again {
-			return b, b.load(msg.tab)
+			return b, tea.Batch(wake, b.load(msg.tab))
 		}
 		if every := b.o.Views[msg.tab].Every; every > 0 {
 			tab, gen := msg.tab, t.gen
-			return b, tea.Tick(every, func(time.Time) tea.Msg { return refreshMsg{tab, gen} })
+			return b, tea.Batch(wake, tea.Tick(every, func(time.Time) tea.Msg { return refreshMsg{tab, gen} }))
 		}
-		return b, nil
+		return b, wake
+
+	case wakeMsg:
+		if msg.tab >= len(b.tabs) || b.o.Views[msg.tab].Wake != msg.ch {
+			return b, nil // the tab was replaced
+		}
+		rearm := wakeOn(msg.tab, msg.ch)
+		if msg.tab != b.cur {
+			b.tabs[msg.tab].stale = true
+			return b, rearm
+		}
+		return b, tea.Batch(rearm, b.load(msg.tab))
 
 	case refreshMsg:
 		if msg.tab >= len(b.tabs) {
@@ -397,6 +537,10 @@ func (b browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return b, nil
 		}
 		return b, b.load(msg.tab)
+
+	case fadeMsg:
+		b.fading = false
+		return b, b.fade()
 
 	case actionMsg:
 		b.busy = ""
@@ -474,6 +618,19 @@ func (b browser) apply(r Result) (tea.Model, tea.Cmd) {
 		return b, tea.Quit
 	}
 	return b, tea.Batch(cmds...)
+}
+
+// live is what the status line says of a tab a watch keeps up to date
+// ("" for one that refreshes).
+func (b browser) live(tab int) string {
+	v := b.o.Views[tab]
+	switch {
+	case v.Wake == nil:
+		return ""
+	case v.Live != nil:
+		return v.Live()
+	}
+	return "live"
 }
 
 // openTab puts v after the fixed tabs, replacing a tab opened before.
@@ -935,16 +1092,16 @@ func (b browser) keyText(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // shown: the rows of the tab that pass its Only and its filter (every word,
-// any case).
+// any case). Hidden rows need an Only.
 func (b browser) shown(tab int) []Item {
 	t := b.tabs[tab]
 	words := strings.Fields(strings.ToLower(t.filter))
-	if len(words) == 0 && t.only == nil {
+	if len(words) == 0 && t.only == nil && !t.hides {
 		return t.items
 	}
 	var out []Item
 	for _, it := range t.items {
-		if t.only != nil && !t.only(it) {
+		if t.only != nil && !t.only(it) || t.only == nil && it.Hidden {
 			continue
 		}
 		text := strings.ToLower(plain(it.Label) + " " + it.Hint + " " + it.Badge)
@@ -1055,6 +1212,9 @@ func keepColors(s string) string {
 var (
 	tabOn     = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("25")).Bold(true)
 	markStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true)
+	// a row a refresh just added (+) or changed (~): a faint band at first
+	litStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.AdaptiveColor{Light: "254", Dark: "236"})
+	litMark  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 )
 
 func (b browser) View() string {
@@ -1078,8 +1238,10 @@ func (b browser) View() string {
 	switch {
 	case t.loading && !t.ready:
 		line += "  " + b.spin.View()
-	case t.loading:
+	case t.loading && time.Since(t.loadStart) > 400*time.Millisecond: // a quick one doesn't blink
 		line += "  " + b.spin.View() + dim.Render(fmt.Sprintf(" %d rows%s · refreshing", len(b.shown(b.cur)), marks))
+	case t.ready && b.live(b.cur) != "":
+		line += dim.Render(fmt.Sprintf("  %d rows%s · %s", len(b.shown(b.cur)), marks, Clean(b.live(b.cur))))
 	case t.ready:
 		line += dim.Render(fmt.Sprintf("  %d rows%s · %s", len(b.shown(b.cur)), marks, t.loadedAt.Format("15:04:05")))
 	}
@@ -1293,6 +1455,14 @@ func (b browser) row(it Item, selected bool) string {
 	case marked:
 		cur = "  " + markStyle.Render("●")
 	}
+	lit, strong, isNew := b.litOf(it)
+	if lit && !selected && !marked {
+		sign := "~"
+		if isNew {
+			sign = "+"
+		}
+		cur = "  " + litMark.Render(sign)
+	}
 	tag := ""
 	switch it.Badge {
 	case "":
@@ -1312,6 +1482,8 @@ func (b browser) row(it Item, selected bool) string {
 		label = selRow.Render(plain(label)) // one style for the whole row
 	case marked:
 		label = markStyle.Render(plain(label))
+	case lit && strong:
+		label = litStyle.Render(plain(label))
 	case it.Dim:
 		label = dim.Render(plain(label))
 	}

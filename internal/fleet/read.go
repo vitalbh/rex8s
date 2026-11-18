@@ -24,6 +24,10 @@ type Reader struct {
 	// within Probe instead of Client.Timeout. Clusters reached through a
 	// proxy (proxy-url, HTTPS_PROXY) are not probed.
 	Probe time.Duration
+	// Source, when set, answers the queries it can (a watch: kwatch.Hub)
+	// instead of kubectl. A cluster whose queries it all answers is neither
+	// probed nor backed off: the source keeps trying by itself.
+	Source Source
 
 	mu    sync.Mutex
 	state map[string]*failure // by Key(cluster)
@@ -130,7 +134,45 @@ func ReadEach[T any](r *Reader, clusters []kube.Context, queries [][]string, par
 	return out
 }
 
+// Source answers kubectl queries some other way. ok is false for a query
+// it doesn't answer (kubectl runs it); err is why it couldn't, as kubectl's
+// error would say (kube.ErrTimeout, "Unauthorized", "unreachable (HOST)").
+type Source interface {
+	Serve(c kube.Context, query []string) (out []byte, ok bool, err error)
+}
+
+// fromSource answers every query of c from r.Source; ok is false when it
+// doesn't answer one of them.
+func fromSource(r *Reader, c kube.Context, queries [][]string) (outs [][]byte, ok bool, skip *Skip) {
+	if r.Source == nil {
+		return nil, false, nil
+	}
+	for _, q := range queries {
+		q, optional := isOptional(q)
+		out, ok, err := r.Source.Serve(c, q)
+		switch {
+		case !ok:
+			return nil, false, nil
+		case err == nil:
+			outs = append(outs, out)
+		case optional:
+			outs = append(outs, nil)
+		case kube.AuthExpired(err):
+			return nil, true, &Skip{Cluster: c, Reason: "login expired (kauth " + c.Short + ")", Expired: true}
+		default:
+			return nil, true, &Skip{Cluster: c, Reason: lastLine(err.Error())}
+		}
+	}
+	return outs, true, nil
+}
+
 func readOne[T any](r *Reader, c kube.Context, queries [][]string, parse Parse[T]) ([]kube.On[T], *Skip) {
+	if outs, ok, skip := fromSource(r, c, queries); ok {
+		if skip != nil {
+			return nil, skip
+		}
+		return parsed(c, outs, parse)
+	}
 	if s := r.backedOff(c); s != nil {
 		return nil, s
 	}
@@ -156,6 +198,10 @@ func readOne[T any](r *Reader, c kube.Context, queries [][]string, parse Parse[T
 		return nil, &Skip{Cluster: c, Reason: lastLine(err.Error())}
 	}
 	r.ok(c)
+	return parsed(c, outs, parse)
+}
+
+func parsed[T any](c kube.Context, outs [][]byte, parse Parse[T]) ([]kube.On[T], *Skip) {
 	vs, err := parse(c, outs)
 	if err != nil {
 		return nil, &Skip{Cluster: c, Reason: err.Error()}

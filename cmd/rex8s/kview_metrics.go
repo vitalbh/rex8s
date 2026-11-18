@@ -2,14 +2,20 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/vitalbh/rex8s/internal/kube"
 )
 
-// kview's CPU and memory columns: `kubectl top` (metrics-server), read in
+// kview's CPU and memory columns: metrics-server's API (metrics.k8s.io),
+// read with kwatch's client — or `kubectl top` where kwatch has none — in
 // the background at most every metricsEvery per cluster and kind, so a tab
 // that refreshes every 5s doesn't ask every 5s. Without metrics-server (or
 // while the first read runs) the columns show "-"; a cluster without it is
@@ -27,6 +33,9 @@ type kvUsage struct {
 
 type kvMetrics struct {
 	cl kube.Client
+	// api reads the metrics API without kubectl (kview's *kwatch.Hub; nil:
+	// kubectl top, as in demo mode).
+	api kvMetricsAPI
 	// sync: read in the caller's goroutine (tests).
 	sync bool
 
@@ -89,9 +98,20 @@ func (m *kvMetrics) refresh(c kube.Context, kind string) {
 	}
 }
 
+// kvMetricsAPI is what kvMetrics needs of kwatch.Hub.
+type kvMetricsAPI interface {
+	List(ctx context.Context, c kube.Context, gvr schema.GroupVersionResource) (*unstructured.UnstructuredList, bool, error)
+	Object(c kube.Context, resource, ns, name string) (map[string]any, bool)
+}
+
 func (m *kvMetrics) read(c kube.Context, kind string, timeout time.Duration) (map[string]kvUsage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	if m.api != nil {
+		if use, ok, err := m.readAPI(ctx, c, kind); ok {
+			return use, err
+		}
+	}
 	args := []string{"top", "pods", "-A", "--no-headers"}
 	if kind == "nodes" {
 		args = []string{"top", "nodes", "--no-headers"}
@@ -132,6 +152,91 @@ func parseTopNodes(out string) map[string]kvUsage {
 		use[f[0]] = kvUsage{cpu: f[1], cpuPct: f[2], mem: f[3], memPct: f[4], cpuM: parseCPU(f[1]), memB: parseMem(f[3])}
 	}
 	return use
+}
+
+var (
+	podMetricsGVR  = schema.GroupVersionResource{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "pods"}
+	nodeMetricsGVR = schema.GroupVersionResource{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "nodes"}
+	nodesGVR       = schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+)
+
+// readAPI reads the metrics API (a list: it can't be watched) into what
+// kubectl top would print; ok is false when kwatch has no client for c.
+func (m *kvMetrics) readAPI(ctx context.Context, c kube.Context, kind string) (map[string]kvUsage, bool, error) {
+	if kind != "nodes" {
+		list, ok, err := m.api.List(ctx, c, podMetricsGVR)
+		if !ok || err != nil {
+			return nil, ok, err
+		}
+		use := map[string]kvUsage{}
+		for _, it := range list.Items {
+			// a pod is the sum of its containers, as in kubectl top pods
+			var cpu, mem resource.Quantity
+			cs, _, _ := unstructured.NestedSlice(it.Object, "containers")
+			for _, ct := range cs {
+				ctm, _ := ct.(map[string]any)
+				u, _ := ctm["usage"].(map[string]any)
+				cpu.Add(quantity(u, "cpu"))
+				mem.Add(quantity(u, "memory"))
+			}
+			use[it.GetNamespace()+"/"+it.GetName()] = topUsage(cpu, mem)
+		}
+		return use, true, nil
+	}
+	list, ok, err := m.api.List(ctx, c, nodeMetricsGVR)
+	if !ok || err != nil {
+		return nil, ok, err
+	}
+	// percentages are of the node's allocatable, as in kubectl top nodes:
+	// from the nodes tab's watch, or else one list of the nodes
+	alloc := map[string]map[string]any{}
+	for _, it := range list.Items {
+		if o, ok := m.api.Object(c, "nodes", "", it.GetName()); ok {
+			alloc[it.GetName()], _, _ = unstructured.NestedMap(o, "status", "allocatable")
+		}
+	}
+	if len(alloc) < len(list.Items) {
+		if nodes, ok, err := m.api.List(ctx, c, nodesGVR); ok && err == nil {
+			for _, n := range nodes.Items {
+				alloc[n.GetName()], _, _ = unstructured.NestedMap(n.Object, "status", "allocatable")
+			}
+		}
+	}
+	use := map[string]kvUsage{}
+	for _, it := range list.Items {
+		u, _, _ := unstructured.NestedMap(it.Object, "usage")
+		cpu, mem := quantity(u, "cpu"), quantity(u, "memory")
+		cpuA, memA := quantity(alloc[it.GetName()], "cpu"), quantity(alloc[it.GetName()], "memory")
+		v := topUsage(cpu, mem)
+		v.cpuPct, v.memPct = topPct(cpu.MilliValue(), cpuA.MilliValue()), topPct(mem.Value(), memA.Value())
+		use[it.GetName()] = v
+	}
+	return use, true, nil
+}
+
+// quantity is m[key] ("250m", "1200Ki"); zero when absent or unreadable.
+func quantity(m map[string]any, key string) resource.Quantity {
+	s, _ := m[key].(string)
+	q, err := resource.ParseQuantity(s)
+	if err != nil {
+		return resource.Quantity{}
+	}
+	return q
+}
+
+// topUsage formats as kubectl top does: millicores, mebibytes.
+func topUsage(cpu, mem resource.Quantity) kvUsage {
+	return kvUsage{cpu: fmt.Sprintf("%dm", cpu.MilliValue()), mem: fmt.Sprintf("%dMi", mem.Value()/(1<<20)),
+		cpuM: cpu.MilliValue(), memB: mem.Value()}
+}
+
+// topPct is use of total as kubectl top nodes prints it ("12%"); "-"
+// without a total.
+func topPct(use, total int64) string {
+	if total <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d%%", int64(float64(use)/float64(total)*100))
 }
 
 func (m *kvMetrics) get(c kube.Context, kind, key string) (kvUsage, bool) {

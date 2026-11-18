@@ -32,6 +32,7 @@ ask_agent: claude                          # kask opens claude or codex
 guard: true                                # the production guard; false turns it off (rex8s setup applies it)
 wrappers: true                             # rex8s setup installs the k* commands; false: none (rex8s kview still works)
 skip_wrappers: [ kns, kctx ]               # k* commands setup leaves out (kubectx, your aliases)
+watch: true                                # kview's tabs and kwarn -A follow the API server live; false: kubectl again and again (was kview_watch, still read)
 node_debug_image: busybox:1.36             # image knode runs on the node
 net_debug_image: nicolaka/netshoot:v0.13   # image knet runs in the namespace
 gitops_repos: [ ~/dev/gitops ]             # local clones of the Flux repos, for kgit

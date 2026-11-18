@@ -43,13 +43,15 @@ a script runs them. The guard is a safety net against slips, not a security
 boundary: a `kubectl` run by its full path, k9s, Lens or other client-go
 programs don't go through it. For a real barrier use RBAC (a read-only
 context for daily work, a separate one with write access) or admission
-policies on the server. Don't want it? `guard: false` in the
+policies on the server. Working on a cluster for a while? `kunlock use 30m`
+lets you (and your coding agents) through without asking, until it runs out.
+Don't want it? `guard: false` in the
 [config](docs/configuration.md#configyaml) turns it off.
 
 | You want to… | Commands |
 |---|---|
-| **browse like k9s** | `kview` tabs for pods, workloads, services, jobs, nodes, warnings — live lists, a key per action (`-A`: every cluster) |
-| **see what's broken** | `kstatus` one screen of health · `kfail` failing pods with their last logs · `kpods` every cluster's pods · `kwarn -A` warnings of every cluster, live |
+| **browse like k9s** | `kview` tabs for pods, workloads, services, jobs (grouped by CronJob), nodes, warnings, and `:` for any kind — live from the API server, what just changed lit up, a key per action (`-A`: every cluster) |
+| **see what's broken** | `kstatus` one screen of health · `kfail` failing pods with their last logs · `kpods` every cluster's pods · `kwarn -A` warnings of every cluster as they happen |
 | **read logs** | `klogs` a workload's pods in one stream (`-A`: mix pods and workloads of any cluster) · `kgrep` search them · cluster URLs in the logs are clickable |
 | **ask why** | `kwhy` Claude explains an unhealthy pod · `kask` a Claude conversation about the cluster or a pod · `kincident` a session laid out for an incident |
 | **reach a service** | `kpf` port-forward that connects only while in use, with the right client command for databases · `kexec` / `knode` / `knet` shells in a pod, a node, a toolbox pod |
@@ -74,7 +76,7 @@ Every command, with its options: **[docs/commands.md](docs/commands.md)**.
 
 ![kmulti: three clusters side by side, kall running the same commands in each](docs/kmulti.gif)
 
-| `kview`: tabs, a filter, describe, a workload's pods, jobs, warnings, nodes | |
+| `kview`: a crashing pod lights up, describe, a workload's pods, a CronJob's runs, `:certificates`, warnings, nodes | |
 |---|---|
 | ![kview](docs/kview.gif) | |
 | **`kpods`**: the pods of every cluster, failing first | **`kpf`**: port-forward in the background, the client command for databases |

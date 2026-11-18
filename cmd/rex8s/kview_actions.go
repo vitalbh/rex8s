@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"sigs.k8s.io/yaml"
+
 	"github.com/vitalbh/rex8s/internal/desktop"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
@@ -60,6 +62,31 @@ func (k *kview) text(c kube.Context, title string, args ...string) tui.Result {
 		return tui.Result{Status: title + ": nothing"}
 	}
 	return tui.Result{Text: tui.Clean(string(out)), TextTitle: c.Short + " · " + title}
+}
+
+// kvObjects is what kview's y needs of kwatch.Hub: an object as its watch
+// holds it.
+type kvObjects interface {
+	Object(c kube.Context, resource, ns, name string) (map[string]any, bool)
+}
+
+// yaml shows resource ns/name ("pods", "deployments", …) as YAML: from
+// what the tab's watch holds, at once, when it has it; else kubectl get -o
+// yaml. The watch dropped kubectl's last-applied annotation (managed
+// fields kubectl hides too), so the title says where it came from.
+func (k *kview) yaml(c kube.Context, title, resource, ns, name string) tui.Result {
+	if k.objects != nil {
+		if o, ok := k.objects.Object(c, resource, ns, name); ok {
+			if out, err := yaml.Marshal(o); err == nil {
+				return tui.Result{Text: tui.Clean(string(out)), TextTitle: c.Short + " · " + title + " (watched, without last-applied)"}
+			}
+		}
+	}
+	args := []string{"get", resource}
+	if ns != "" {
+		args = append(args, "-n", ns)
+	}
+	return k.text(c, title, append(args, name, "-o", "yaml")...)
 }
 
 // ── splits ─────────────────────────────────────────────────────────────
@@ -335,7 +362,7 @@ func (k *kview) podAction(v kube.On[kube.Pod], key string) tui.Result {
 	case "e":
 		return tui.Result{Text: objectEvents(k.cl, c.Name, p.Namespace, "Pod", p.Name, 0), TextTitle: c.Short + " · events of " + p.Name}
 	case "y":
-		return k.text(c, "pod "+p.Name, "get", "pod", "-n", p.Namespace, p.Name, "-o", "yaml")
+		return k.yaml(c, "pod "+p.Name, "pods", p.Namespace, p.Name)
 	case "w":
 		if _, err := k.a.aiCommand(); err != nil {
 			return tui.Result{Err: err}
@@ -542,7 +569,7 @@ func (k *kview) workloadAction(v kube.On[kube.Workload], key string) tui.Result 
 	case "d":
 		return k.text(c, "describe "+ref, "describe", "-n", w.Namespace, ref)
 	case "y":
-		return k.text(c, ref, "get", "-n", w.Namespace, ref, "-o", "yaml")
+		return k.yaml(c, ref, strings.ToLower(w.Kind)+"s", w.Namespace, w.Name)
 	}
 	return tui.Result{}
 }
@@ -615,29 +642,39 @@ func (k *kview) serviceAction(v kube.On[kube.Service], key string) tui.Result {
 	case "d":
 		return k.text(c, "describe svc "+s.Name, "describe", "svc", "-n", s.Namespace, s.Name)
 	case "y":
-		return k.text(c, "svc "+s.Name, "get", "svc", "-n", s.Namespace, s.Name, "-o", "yaml")
+		return k.yaml(c, "svc "+s.Name, "services", s.Namespace, s.Name)
 	}
 	return tui.Result{}
 }
 
+// jobAction: enter on a CronJob shows its runs (Hidden rows of the tab),
+// on a Job its pods; l on a CronJob follows its last run's logs.
 func (k *kview) jobAction(v kvJob, key string) tui.Result {
 	c := v.c
 	if v.cron != nil {
 		cj := *v.cron
 		switch key {
+		case "enter":
+			return tui.Result{Goto: vJobs + 1, Only: k.runsOf(c, cj.Namespace, cj.Name),
+				OnlyLabel: "runs of cronjob " + cj.Namespace + "/" + cj.Name + k.where(c)}
 		case "r":
 			return k.guarded(c, "-n", cj.Namespace, "create", "job", manualJobName(cj.Name, time.Now()), "--from=cronjob/"+cj.Name)
 		case "d":
 			return k.text(c, "describe cronjob "+cj.Name, "describe", "cronjob", "-n", cj.Namespace, cj.Name)
 		case "y":
-			return k.text(c, "cronjob "+cj.Name, "get", "cronjob", "-n", cj.Namespace, cj.Name, "-o", "yaml")
+			return k.yaml(c, "cronjob "+cj.Name, "cronjobs", cj.Namespace, cj.Name)
 		case "l":
-			return tui.Result{Err: errors.New("a CronJob has no logs: pick one of its jobs")}
+			if v.last == nil {
+				return tui.Result{Err: errors.New("cronjob/" + cj.Name + " has no runs left (its history limits cleaned them up)")}
+			}
+			return k.split("logs", false, "logs "+v.last.Name, "_logs", c.Name, cj.Namespace, "job/"+v.last.Name)
 		}
 		return tui.Result{}
 	}
 	j := *v.job
 	switch key {
+	case "enter":
+		return tui.Result{Goto: vPods + 1, Only: k.podsOf(c, j.Namespace, "job-name="+j.Name), OnlyLabel: "pods of job " + j.Namespace + "/" + j.Name + k.where(c)}
 	case "l":
 		return k.split("logs", false, "logs "+j.Name, "_logs", c.Name, j.Namespace, "job/"+j.Name)
 	case "r":
@@ -648,7 +685,7 @@ func (k *kview) jobAction(v kvJob, key string) tui.Result {
 	case "d":
 		return k.text(c, "describe job "+j.Name, "describe", "job", "-n", j.Namespace, j.Name)
 	case "y":
-		return k.text(c, "job "+j.Name, "get", "job", "-n", j.Namespace, j.Name, "-o", "yaml")
+		return k.yaml(c, "job "+j.Name, "jobs", j.Namespace, j.Name)
 	}
 	return tui.Result{}
 }
@@ -663,7 +700,7 @@ func (k *kview) nodeAction(v kube.On[kube.Node], key string) tui.Result {
 	case "d":
 		return k.text(c, "describe node "+n.Name, "describe", "node", n.Name)
 	case "y":
-		return k.text(c, "node "+n.Name, "get", "node", n.Name, "-o", "yaml")
+		return k.yaml(c, "node "+n.Name, "nodes", "", n.Name)
 	}
 	return tui.Result{}
 }

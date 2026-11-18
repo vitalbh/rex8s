@@ -26,6 +26,7 @@ var configKeys = map[string]string{
 	"login_url":        "page kauth opens when a login expired",
 	"notifications":    "true or false: macOS notifications",
 	"guard":            "true (default) or false: the production guard (kubectl/helm/flux, kview, kroll… ask before changing production); rex8s setup applies it",
+	"watch":            "true (default) or false: kview's tabs and kwarn -A follow the API server live; false: kubectl again and again (was kview_watch)",
 	"wrappers":         "true (default) or false: rex8s setup installs the k* commands (rex8s kview… works either way)",
 	"skip_wrappers":    "list: k* commands setup leaves out, e.g. kns, kctx (config add/remove; rex8s setup applies it)",
 	"ai_command":       "CLI for kwhy (claude by default), or off",
@@ -38,6 +39,10 @@ var configKeys = map[string]string{
 }
 
 var listKeys = map[string]bool{"gitops_repos": true, "hide": true, "skip_wrappers": true}
+
+// oldKeys: settings that were renamed, by their old name. rex8s config
+// takes the old name for the new; writing the new one removes the old.
+var oldKeys = map[string]string{"kview_watch": "watch"}
 
 // rex8s config [get KEY | set KEY VALUE | unset KEY | add KEY VALUE | remove KEY VALUE]
 // No arguments: every setting with its current value.
@@ -56,6 +61,21 @@ func (a *app) configCmd(args []string) error {
 var setupKeys = map[string]bool{"guard": true, "wrappers": true, "skip_wrappers": true}
 
 func (a *app) configChange(args []string) error {
+	if len(args) > 1 && oldKeys[args[1]] != "" {
+		args = append([]string{args[0], oldKeys[args[1]]}, args[2:]...)
+	}
+	old := "" // the key's old name, removed when the key is written
+	for o, k := range oldKeys {
+		if len(args) > 1 && k == args[1] {
+			old = o
+		}
+	}
+	dropOld := func(doc string) string {
+		if old == "" {
+			return doc
+		}
+		return yamledit.RemoveKey(doc, old)
+	}
 	need := func(n int) error {
 		if len(args) < n {
 			return fmt.Errorf("usage: rex8s config %s KEY%s", args[0], map[bool]string{true: " VALUE", false: ""}[n > 2])
@@ -80,11 +100,11 @@ func (a *app) configChange(args []string) error {
 		if listKeys[key] {
 			return fmt.Errorf("%s is a list: rex8s config add %s VALUE", key, key)
 		}
-		if key == "notifications" || key == "guard" || key == "wrappers" {
+		if key == "notifications" || key == "guard" || key == "wrappers" || key == "watch" {
 			if _, err := strconv.ParseBool(val); err != nil {
 				return fmt.Errorf("%s: true or false", key)
 			}
-			return a.editConfig(func(doc string) string { return yamledit.SetKey(doc, key, val) })
+			return a.editConfig(func(doc string) string { return dropOld(yamledit.SetKey(doc, key, val)) })
 		}
 		if key == "forward_expire" {
 			if err := config.ValidForwardExpire(val); err != nil {
@@ -112,7 +132,7 @@ func (a *app) configChange(args []string) error {
 		if err := need(2); err != nil {
 			return err
 		}
-		return a.editConfig(func(doc string) string { return yamledit.RemoveKey(doc, args[1]) })
+		return a.editConfig(func(doc string) string { return dropOld(yamledit.RemoveKey(doc, args[1])) })
 	case "add":
 		if err := need(3); err != nil {
 			return err
@@ -164,6 +184,11 @@ func (a *app) configValue(key string) string {
 		return ""
 	}
 	v, ok := m[key]
+	for o, k := range oldKeys {
+		if k == key && (!ok || v == nil) {
+			v, ok = m[o]
+		}
+	}
 	if !ok || v == nil {
 		return ""
 	}

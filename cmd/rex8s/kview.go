@@ -15,6 +15,7 @@ import (
 
 	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
+	"github.com/vitalbh/rex8s/internal/kwatch"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
@@ -29,9 +30,15 @@ import (
 //
 //	kview [-A [GROUP | CLUSTER[,CLUSTER…]] | --context CTX] [pods|workloads|services|jobs|nodes|warnings]
 type kview struct {
-	a        *app
-	cl       kube.Client
-	fleet    *fleet.Reader // remembers unreachable clusters between refreshes
+	a     *app
+	cl    kube.Client
+	fleet *fleet.Reader // remembers unreachable clusters between refreshes
+	// hub watches the tabs' objects (nil: kubectl on every refresh, as
+	// in demo mode and tests); wakes is each tab's View.Wake.
+	hub      *kwatch.Hub
+	wakeMu   sync.Mutex // wakes and queries, and the Notify calls with them
+	wakes    map[string]chan struct{}
+	queries  map[string][][]string // view → what its loader reads (for View.Live)
 	clusters []kube.Context
 	multi    bool
 
@@ -40,6 +47,8 @@ type kview struct {
 	headers map[string]string // view → its column titles, sized by the last load
 
 	metrics *kvMetrics // CPU and memory (nil: no columns filled, as in tests)
+	objects kvObjects  // what the watches hold, for y (the hub; nil: kubectl)
+	next    kvNextRuns // the CronJobs' next runs, for the jobs tab
 	splits  kvSplits   // the Rex splits it opened
 	api     kvAPI      // kubectl api-resources, for ":"
 
@@ -255,6 +264,12 @@ func (a *app) runKview(o kviewOpts) error {
 	}
 	k.metrics = newKvMetrics(k.cl)
 	k.tab = newTabStatus()
+	var stopHub func()
+	k.hub, stopHub = a.watchHub(k.cl, k.fleet)
+	defer stopHub()
+	if k.hub != nil {
+		k.metrics.api, k.objects = k.hub, k.hub
+	}
 	rex.Rename(kviewLabel(k.clusters, o.all, strings.Join(o.clusters, ","), o.ns))
 
 	// closing the pane (SIGHUP) still closes the splits it opened
@@ -289,6 +304,84 @@ func (k *kview) cleanup() {
 	}
 }
 
+// wake makes the View.Wake of a tab: nil without a watch.
+func (k *kview) wake(view string) <-chan struct{} {
+	if k.hub == nil {
+		return nil
+	}
+	k.wakeMu.Lock()
+	defer k.wakeMu.Unlock()
+	if k.wakes == nil {
+		k.wakes = map[string]chan struct{}{}
+	}
+	ch := make(chan struct{}, 1)
+	k.wakes[view] = ch
+	return ch
+}
+
+// notify asks the hub to wake the tab when what its queries read changes
+// (nothing once its wake was dropped).
+func (k *kview) notify(view string, queries [][]string) {
+	k.wakeMu.Lock()
+	defer k.wakeMu.Unlock()
+	ch := k.wakes[view]
+	if ch == nil {
+		return
+	}
+	for _, c := range k.clusters {
+		for _, q := range queries {
+			k.hub.Notify(c, q, ch)
+		}
+	}
+}
+
+// dropWakes ends the wakes of the tabs whose view starts with prefix (a
+// ":" tab another replaced): their watches stop, and their channels close,
+// which ends the browser's wait on them.
+func (k *kview) dropWakes(prefix string) {
+	k.wakeMu.Lock()
+	defer k.wakeMu.Unlock()
+	for view, ch := range k.wakes {
+		if strings.HasPrefix(view, prefix) {
+			k.hub.Release(ch) // nothing sends on ch once it returns
+			close(ch)
+			delete(k.wakes, view)
+		}
+	}
+}
+
+// live is a tab's View.Live: "live" when watches answer for every cluster,
+// "live · polling sa,euw" when kubectl reads some (a legacy auth-provider,
+// a kind a cluster doesn't have), "" when it reads them all.
+func (k *kview) live(view string) func() string {
+	if k.hub == nil {
+		return nil
+	}
+	return func() string {
+		k.wakeMu.Lock()
+		queries := k.queries[view]
+		k.wakeMu.Unlock()
+		var polling []string
+		for _, c := range k.clusters {
+			for _, q := range queries {
+				if !k.hub.Watching(c.Name, q) {
+					polling = append(polling, c.Short)
+					break
+				}
+			}
+		}
+		switch {
+		case len(polling) == 0:
+			return "live"
+		case len(polling) == len(k.clusters):
+			return ""
+		case len(polling) <= 3:
+			return "live · polling " + strings.Join(polling, ",")
+		}
+		return fmt.Sprintf("live · %d polling", len(polling))
+	}
+}
+
 func (k *kview) views() []tui.View {
 	every := func(one, many time.Duration) time.Duration {
 		if k.multi {
@@ -296,26 +389,30 @@ func (k *kview) views() []tui.View {
 		}
 		return one
 	}
-	return []tui.View{
-		{Name: "pods", Header: k.header("pods", podHeader), Load: podTab.loader(k), Every: every(5*time.Second, 15*time.Second),
+	vs := []tui.View{
+		{Name: "pods", Wake: k.wake("pods"), Header: k.header("pods", podHeader), Load: podTab.loader(k), Every: every(5*time.Second, 15*time.Second),
 			Actions: []tui.Action{act("enter", "owner"), act("l", "logs"), act("p", "previous logs"), act("s", "shell"), act("d", "describe"),
 				act("e", "events"), act("y", "yaml"), act("w", "why"), act("a", "ask"), many("ctrl+d", "delete")},
 			Sorts: k.sorts(sortName, sortAge, sortStatus, sortRestarts, sortCPU, sortMem)},
-		{Name: "workloads", Header: k.header("workloads", workloadHeader), Load: workloadTab.loader(k), Every: every(10*time.Second, 20*time.Second),
+		{Name: "workloads", Wake: k.wake("workloads"), Header: k.header("workloads", workloadHeader), Load: workloadTab.loader(k), Every: every(10*time.Second, 20*time.Second),
 			Actions: []tui.Action{act("enter", "pods"), act("l", "logs"), many("r", "restart"), act("d", "describe"), act("y", "yaml")},
 			Sorts:   k.sorts(sortName, sortAge, sortStatus)},
-		{Name: "services", Header: k.header("services", serviceHeader), Load: serviceTab.loader(k), Every: 30 * time.Second,
+		{Name: "services", Wake: k.wake("services"), Header: k.header("services", serviceHeader), Load: serviceTab.loader(k), Every: 30 * time.Second,
 			Actions: []tui.Action{act("enter", "forward"), act("o", "pods"), act("d", "describe"), act("y", "yaml")},
 			Sorts:   k.sorts(sortName)},
-		{Name: "jobs", Header: k.header("jobs", "KIND NAMESPACE/NAME"), Load: jobTab.loader(k), Every: every(15*time.Second, 30*time.Second),
-			Actions: []tui.Action{act("l", "logs"), danger("r", "run now"), act("d", "describe"), act("y", "yaml")},
+		{Name: "jobs", Wake: k.wake("jobs"), Header: k.header("jobs", jobHeader), Load: jobTab.loader(k), Every: every(15*time.Second, 30*time.Second),
+			Actions: []tui.Action{act("enter", "runs/pods"), act("l", "logs"), danger("r", "run now"), act("d", "describe"), act("y", "yaml")},
 			Sorts:   k.sorts(sortName)},
-		{Name: "nodes", Header: k.header("nodes", nodeHeader), Load: nodeTab.loader(k), Every: 30 * time.Second,
+		{Name: "nodes", Wake: k.wake("nodes"), Header: k.header("nodes", nodeHeader), Load: nodeTab.loader(k), Every: 30 * time.Second,
 			Actions: []tui.Action{act("enter", "pods"), act("s", "shell"), act("d", "describe"), act("y", "yaml")},
 			Sorts:   k.sorts(sortName, sortAge, sortStatus, sortCPU, sortMem)},
-		{Name: "warnings", Header: k.header("warnings", warningHeader), Load: warningTab.loader(k), Every: every(10*time.Second, 20*time.Second),
+		{Name: "warnings", Wake: k.wake("warnings"), Header: k.header("warnings", warningHeader), Load: warningTab.loader(k), Every: every(10*time.Second, 20*time.Second),
 			Actions: []tui.Action{act("enter", "go to object"), act("d", "describe")}},
 	}
+	for i := range vs {
+		vs[i].Live = k.live(vs[i].Name)
+	}
+	return vs
 }
 
 func act(key, label string) tui.Action { return tui.Action{Key: key, Label: label} }
@@ -404,6 +501,12 @@ func parseOne[T any](parse func([]byte) ([]T, error)) fleet.Parse[T] {
 // (unreachable, backed off, login expired) come last as dim rows; when every
 // cluster is skipped the load fails, and the browser keeps the last rows.
 func (t kviewTab[T]) loader(k *kview) func(partial func([]tui.Item)) ([]tui.Item, error) {
+	k.wakeMu.Lock()
+	if k.queries == nil {
+		k.queries = map[string][][]string{}
+	}
+	k.queries[t.view] = t.queries
+	k.wakeMu.Unlock()
 	var prev map[string][]kube.On[T] // cluster name → its rows from the last load
 	return func(partial func([]tui.Item)) ([]tui.Item, error) {
 		var mu sync.Mutex
@@ -429,6 +532,7 @@ func (t kviewTab[T]) loader(k *kview) func(partial func([]tui.Item)) ([]tui.Item
 			k.keep(objs, t.prefix)
 			return append(items, tail...)
 		}
+		k.notify(t.view, t.queries) // changes wake the tab: ask before reading, to miss none
 		res := fleet.ReadEach(k.fleet, k.clusters, t.queries, t.parse, func(c kube.Context, rows []kube.On[T], skip *fleet.Skip) {
 			if skip == nil && t.metrics != "" && k.metrics != nil {
 				k.metrics.refresh(c, t.metrics) // in the background, at most every metricsEvery
@@ -680,9 +784,11 @@ var podTab = kviewTab[kube.Pod]{
 			if u, ok := k.metrics.pod(r.C, r.V.Namespace, r.V.Name); ok {
 				cpu, mem = u.cpu, u.mem
 			}
-			cells := fmt.Sprintf("%-*s  %-5s %-18s %3d  %-6s %-7s %s", w, ref, fmt.Sprintf("%d/%d", r.V.Ready, r.V.Total),
+			ready := fmt.Sprintf("%d/%d", r.V.Ready, r.V.Total)
+			cells := fmt.Sprintf("%-*s  %-5s %-18s %3d  %-6s %-7s %s", w, ref, ready,
 				r.V.Status(), r.V.Restarts, cpu, mem, kube.Age(r.V.Created))
-			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Badge: r.V.Badge(), Name: kvName(r.C, "pod", ref)})
+			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Badge: r.V.Badge(), Name: kvName(r.C, "pod", ref),
+				Sig: fmt.Sprintf("%s|%s|%d", ready, r.V.Status(), r.V.Restarts)}) // not the age, CPU or memory
 		}
 		return header, items, objs
 	},
@@ -724,9 +830,10 @@ var workloadTab = kviewTab[kube.Workload]{
 				}
 			}
 			kind := kube.ShortKind(r.V.Kind)
-			cells := fmt.Sprintf("%-7s %-*s  %-7s %-5s %s", kind, w, ref,
-				fmt.Sprintf("%d/%d", r.V.Ready, r.V.Desired), kube.Age(r.V.Created), image)
-			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Badge: badge, Name: kvName(r.C, kind, ref)})
+			ready := fmt.Sprintf("%d/%d", r.V.Ready, r.V.Desired)
+			cells := fmt.Sprintf("%-7s %-*s  %-7s %-5s %s", kind, w, ref, ready, kube.Age(r.V.Created), image)
+			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Badge: badge, Name: kvName(r.C, kind, ref),
+				Sig: ready + "|" + image})
 		}
 		return header, items, objs
 	},
@@ -758,50 +865,10 @@ var serviceTab = kviewTab[kube.Service]{
 				kinds = append(kinds, fmt.Sprintf("%d/%s", p.Port, detectKind(p)))
 			}
 			cells := fmt.Sprintf("%-*s  %-12s %s", w, ref, r.V.Type, strings.Join(kinds, " "))
-			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Name: kvName(r.C, "svc", ref)})
+			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Name: kvName(r.C, "svc", ref),
+				Sig: r.V.Type + "|" + strings.Join(kinds, " ")})
 		}
 		return header, items, objs
-	},
-}
-
-// ── jobs ───────────────────────────────────────────────────────────────
-
-type kvJob struct {
-	c    kube.Context
-	job  *kube.Job
-	cron *kube.CronJob
-}
-
-var jobTab = kviewTab[jobsAndCrons]{
-	view: "jobs", prefix: "job|",
-	queries: jobQueries,
-	parse:   parseJobsAndCrons,
-	rows: func(k *kview, read []kube.On[jobsAndCrons]) (string, []tui.Item, map[string]any) {
-		w := 0
-		for _, r := range read {
-			w = max(w, jobNameWidth(r.V.jobs, r.V.crons))
-		}
-		objs, names := map[string]any{}, map[string]string{}
-		var rows []jobRow
-		for _, r := range read {
-			ix := newJobIndex()
-			rows = append(rows, jobRows(jobRowsIn{jobs: r.V.jobs, crons: r.V.crons, keyPrefix: "job|" + r.C.Name + "|", labelPrefix: k.row(r.C, ""), width: w}, ix)...)
-			for key, j := range ix.jobs {
-				objs[key] = kvJob{c: r.C, job: &j}
-				names[key] = kvName(r.C, "job", j.Namespace+"/"+j.Name)
-			}
-			for key, cj := range ix.crons {
-				objs[key] = kvJob{c: r.C, cron: &cj}
-				names[key] = kvName(r.C, "cronjob", cj.Namespace+"/"+cj.Name)
-			}
-		}
-		sortJobRows(rows)
-		items := make([]tui.Item, len(rows))
-		for i, r := range rows {
-			items[i] = r.item
-			items[i].Name = names[r.item.Key]
-		}
-		return "", items, objs // the header stays "KIND NAMESPACE/NAME"
 	},
 }
 
@@ -847,7 +914,8 @@ var nodeTab = kviewTab[kube.Node]{
 			}
 			cells := fmt.Sprintf("%-*s  %-*s %-*s %-5s %-11s %-12s %s", w, r.V.Name, rw, orDash(strings.Join(r.V.Roles, ",")), vw, r.V.Version,
 				kube.Age(r.V.Created), cpu, mem, state)
-			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Badge: badge, Name: kvName(r.C, "node", r.V.Name)})
+			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Badge: badge, Name: kvName(r.C, "node", r.V.Name),
+				Sig: state + "|" + r.V.Version}) // not the age, CPU or memory
 		}
 		return header, items, objs
 	},
@@ -899,7 +967,8 @@ var warningTab = kviewTab[kube.Event]{
 			}
 			cells := fmt.Sprintf("%-8s  %s %s %s%s  %s", kube.Age(r.when)+" ago", r.e.Metadata.Namespace, obj, r.e.Reason, count,
 				truncate(oneLine(tui.Clean(r.e.Message)), 200))
-			items = append(items, tui.Item{Key: key, Label: k.row(r.c, cells), Name: kvName(r.c, "event of", r.e.Metadata.Namespace+"/"+obj)})
+			items = append(items, tui.Item{Key: key, Label: k.row(r.c, cells), Name: kvName(r.c, "event of", r.e.Metadata.Namespace+"/"+obj),
+				Sig: count + "|" + r.e.Message}) // seen again: x3 → x4
 		}
 		return warningHeader, items, objs
 	},
