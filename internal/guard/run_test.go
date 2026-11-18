@@ -58,6 +58,7 @@ type fake struct {
 	asked  bool
 	stderr bytes.Buffer
 	ran    []string
+	bin    string // what ran
 }
 
 func setup(t *testing.T, f *fake) string {
@@ -86,7 +87,7 @@ func setup(t *testing.T, f *fake) string {
 		stderr: &f.stderr,
 		color:  func() bool { return false },
 		exec: func(bin string, argv []string) error {
-			f.ran = argv
+			f.ran, f.bin = argv, bin
 			return nil
 		},
 	}
@@ -232,7 +233,7 @@ func TestConfirmChange(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fake{env: c.env, tty: c.tty, noTTY: c.noTTY, answer: c.answer}
 			log := setup(t, f)
-			err := ConfirmChange(c.clusters, "kroll: rollout restart 2 workload(s)")
+			err := ConfirmChange(nil, c.clusters, "kroll: rollout restart 2 workload(s)")
 			if !errors.Is(err, c.err) || (c.err == nil && err != nil) {
 				t.Fatalf("err = %v, want %v", err, c.err)
 			}
@@ -262,5 +263,73 @@ func TestAuditRotates(t *testing.T) {
 	}
 	if fi, err := os.Stat(log + ".1"); err != nil || fi.Size() != auditMax {
 		t.Fatalf("old log: %v %v", fi, err)
+	}
+}
+
+// guard: false turns the guard off: Run hands any command to the tool and
+// ConfirmChange lets any change through, nothing asked, nothing logged.
+func TestGuardOff(t *testing.T) {
+	off := false
+	cfg := *testCfg
+	cfg.Guard = &off
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "kubectl"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	f := &fake{env: map[string]string{"REX8S_AGENT": "1"}}
+	log := setup(t, f)
+	args := strings.Fields("--context use delete pod x")
+	if err := Run("kubectl", args, "", &cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := append([]string{"kubectl"}, args...); strings.Join(f.ran, " ") != strings.Join(want, " ") || f.asked {
+		t.Fatalf("ran %q, asked %v", f.ran, f.asked)
+	}
+	use := kube.Context{Name: "use", Short: "use", Prod: true}
+	if err := ConfirmChange(&cfg, []kube.Context{use}, "kroll"); err != nil || f.asked {
+		t.Fatalf("ConfirmChange: %v, asked %v", err, f.asked)
+	}
+	if lines := auditLines(t, log); len(lines) != 0 {
+		t.Errorf("audit with the guard off: %q", lines)
+	}
+
+	// on (the default): the same change is refused for the agent
+	if err := ConfirmChange(testCfg, []kube.Context{use}, "kroll"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("guard on: %v", err)
+	}
+}
+
+// The kubectl the guard runs is never the guard: with kubectl ->
+// rex8s-guard first on PATH (setup's link), told to skip that directory or
+// not (a Homebrew rex8s-guard resolves into the Cellar), it runs the next one.
+func TestRunSkipsItsOwnLink(t *testing.T) {
+	root := t.TempDir()
+	wrap, real := filepath.Join(root, "wrap"), filepath.Join(root, "real")
+	for _, d := range []string{wrap, real} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(wrap, "rex8s-guard"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("rex8s-guard", filepath.Join(wrap, "kubectl")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "kubectl"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", wrap+string(os.PathListSeparator)+real)
+	for _, skip := range []string{wrap, ""} {
+		f := &fake{}
+		setup(t, f)
+		if err := Run("kubectl", []string{"get", "pods"}, skip, testCfg); err != nil {
+			t.Fatal(err)
+		}
+		if f.bin != filepath.Join(real, "kubectl") {
+			t.Errorf("skip %q: ran %q, want the real kubectl", skip, f.bin)
+		}
 	}
 }

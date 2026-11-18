@@ -71,9 +71,9 @@ func TestEndToEndDemo(t *testing.T) {
 	env := e2eEnv(t, home, demoDir)
 	bin := buildRex8s(t)
 
-	run := func(t *testing.T, args ...string) (stdout, stderr string) {
+	runAs := func(t *testing.T, exe string, args ...string) (stdout, stderr string) {
 		t.Helper()
-		cmd := exec.Command(bin, args...)
+		cmd := exec.Command(exe, args...)
 		cmd.Env, cmd.Dir = env, home
 		var o, e bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &o, &e
@@ -92,6 +92,10 @@ func TestEndToEndDemo(t *testing.T) {
 			t.Fatalf("rex8s %s did not finish", strings.Join(args, " "))
 		}
 		return o.String(), e.String()
+	}
+	run := func(t *testing.T, args ...string) (stdout, stderr string) {
+		t.Helper()
+		return runAs(t, bin, args...)
 	}
 	contains := func(t *testing.T, what, got string, wants ...string) {
 		t.Helper()
@@ -202,6 +206,18 @@ func TestEndToEndDemo(t *testing.T) {
 		out, errOut := run(t, "kver")
 		contains(t, "kver", out, "workload", "euw", "staging", "use", "api deploy", "1.42.0")
 		contains(t, "kver stderr", errOut, "reading workloads on 4 clusters")
+	})
+
+	// kver -> rex8s, as setup links it: the name is the command
+	t.Run("as a link", func(t *testing.T) {
+		w := t.TempDir()
+		for _, l := range [][2]string{{bin, "rex8s"}, {bin, "rex8s-guard"}, {"rex8s", "kver"}} {
+			if err := os.Symlink(l[0], filepath.Join(w, l[1])); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out, _ := runAs(t, filepath.Join(w, "kver"))
+		contains(t, "kver as a link", out, "workload", "euw", "api deploy", "1.42.0")
 	})
 
 	t.Run("kstatus", func(t *testing.T) {

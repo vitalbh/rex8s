@@ -20,12 +20,31 @@ command? **`khelp`** lists every one in a picker; enter runs it.
 
 Without Homebrew, from source, or on a Linux server: [Install](docs/install.md).
 
+### Without Rex
+
+The `k*` commands work in any terminal (bash, zsh, iTerm, a Linux server):
+`rex8s setup` installs just them when Rex isn't there, and they use the
+machine's current context. `kview`, `kpods`, `kfind`, `kfail`, `kstatus`,
+`kwarn`, `klogs`, `kpf`, `kwhy`/`kask`, the Flux commands and the production
+guard (with `kunlock`) all work; logs and shells open in the terminal itself
+instead of a split.
+
+What needs Rex: one isolated cluster per pane (its own context, the
+`PROD use/api` label, the red tint), the shortcuts and palette actions,
+`kmulti`/`kall`, `kincident`, splits beside `kview`, and tab status.
+Details: [In any shell](docs/configuration.md#in-any-shell).
+
 ## What it does
 
 Every pane is **one cluster**: its own context and namespace, a label that
 says where you are (`PROD use/api`), production tinted red, and a guard that
 asks before `kubectl`/`helm`/`flux` change production — also when an agent or
-a script runs them.
+a script runs them. The guard is a safety net against slips, not a security
+boundary: a `kubectl` run by its full path, k9s, Lens or other client-go
+programs don't go through it. For a real barrier use RBAC (a read-only
+context for daily work, a separate one with write access) or admission
+policies on the server. Don't want it? `guard: false` in the
+[config](docs/configuration.md#configyaml) turns it off.
 
 | You want to… | Commands |
 |---|---|

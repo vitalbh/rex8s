@@ -2,8 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"os/exec"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,13 +19,36 @@ import (
 
 // Browser is a k9s-like screen: one tab per kind of object, each a list that
 // refreshes by itself; letters run actions on the row under the cursor ("/"
-// filters), and text results (describe, YAML…) open in a viewer.
+// filters), and text results (describe, YAML…) open in a viewer. Space marks
+// rows for the actions that take many; ":" opens a tab of another kind
+// (BrowserOptions.Command); shift+letters sort; a Goto can be undone with
+// esc or backspace.
 
 // Action is a key that does something with the selected row.
 type Action struct {
 	Key     string // as Bubble Tea names it: "l", "ctrl+d", "enter"
 	Label   string // shown in the help line
 	Confirm bool   // changes something: asks y/N first (production still asks again)
+	// Multi: with rows marked (space), it acts on every marked row at once
+	// through BrowserOptions.ActionMany, after one y/N that lists them.
+	Multi bool
+}
+
+// SortKey is a key that sorts a tab: "N" by name. Pressed again, it
+// reverses the order.
+type SortKey struct {
+	Key  string
+	Name string              // shown in the header: "sort: restarts ↓"
+	Cmp  func(a, b Item) int // ascending; rows without a Key always come last
+	Desc bool                // the first press sorts descending (restarts, CPU: the most first)
+}
+
+// Choice is a short list to pick from (which container?). Then runs in the
+// background with the index picked, like an action.
+type Choice struct {
+	Title   string
+	Options []string
+	Then    func(i int) Result
 }
 
 // View is one tab.
@@ -35,6 +61,7 @@ type View struct {
 	Load    func(partial func([]Item)) ([]Item, error)
 	Every   time.Duration // refresh interval (0: only on R)
 	Actions []Action
+	Sorts   []SortKey
 }
 
 // Result is what an action asks the browser to do next.
@@ -53,6 +80,15 @@ type Result struct {
 	OnlyLabel string
 	Reload    bool // reload this tab now
 	Quit      bool
+	// Open adds a tab (or replaces the one an earlier Open added) and goes
+	// there, with Filter/Only like Goto: ":ingress".
+	Open *View
+	// Choose asks which one first (a container); its Then is the result.
+	Choose *Choice
+	// Run runs in this process with the terminal (the browser steps aside),
+	// then the browser comes back and reloads: a change that confirms on the
+	// terminal first.
+	Run func() error
 }
 
 // BrowserOptions configures a browser.
@@ -62,6 +98,14 @@ type BrowserOptions struct {
 	Start  int
 	Filter string                                     // the starting tab's filter
 	Action func(view int, it Item, key string) Result // runs in the background
+	// ActionMany runs a Multi action on the marked rows (in the background).
+	ActionMany func(view int, its []Item, key string) Result
+	// Command runs what was typed after ":" (in the background); its
+	// Result usually Opens a tab or Goes to one.
+	Command func(text string) Result
+	// Complete suggests what to type after ":" (it must not block), best
+	// first: each one is shown whole, and its first word is what gets typed.
+	Complete func(prefix string) []string
 	// Reload, when set, runs on R before the tab loads again (to retry
 	// clusters that were skipped, say).
 	Reload func()
@@ -74,7 +118,8 @@ func RunBrowser(o BrowserOptions) error {
 }
 
 type tabState struct {
-	items     []Item
+	items     []Item // sorted by the tab's sort, when it has one
+	raw       []Item // as loaded: the order without a sort
 	err       error
 	ready     bool      // a load answered (in part, at least): rows or an error to show
 	loading   bool      //
@@ -89,21 +134,38 @@ type tabState struct {
 	offset    int
 	key       string // the selected row's Key, kept across refreshes
 	moved     bool   // the cursor was moved; until then a first load's partial rows keep it on top
+	marks     map[string]bool
+	sort      int // 1+index in View.Sorts; 0: as loaded
+	desc      bool
 }
 
 // What the keys do.
 const (
-	modeList   = iota // move, act on the selected row
-	modeFilter        // typing the filter
-	modeText          // reading an action's text
+	modeList    = iota // move, act on the selected row
+	modeFilter         // typing the filter
+	modeText           // reading an action's text
+	modeCommand        // typing after ":"
+	modeChoose         // picking one of a Choice
 )
+
+// navEntry is where a Goto came from: esc or backspace goes back there.
+type navEntry struct {
+	tab       string // its View.Name (an opened tab may be gone)
+	filter    string
+	only      func(Item) bool
+	onlyLabel string
+	key       string
+}
 
 type browser struct {
 	o       BrowserOptions
+	fixed   int // the tabs BrowserOptions gave; an Open adds one after them
 	tabs    []tabState
 	cur     int
-	mode    int // modeList, modeFilter or modeText
+	mode    int // modeList, modeFilter…
 	input   textinput.Model
+	cmdIn   textinput.Model
+	sugSel  int // the highlighted suggestion after ":"
 	spin    spinner.Model
 	busy    string // an action is running
 	status  string
@@ -112,12 +174,16 @@ type browser struct {
 	text    []string
 	textTtl string
 	scroll  int
+	choice  *Choice
+	choiceI int
+	history []navEntry
+	gens    *int // load generations, unique across tabs (an opened tab reuses an index)
 	w, h    int
 }
 
 type pending struct {
 	view int
-	it   Item
+	its  []Item // one, or the marked rows of a Multi action
 	act  Action
 }
 
@@ -141,10 +207,18 @@ func newBrowser(o BrowserOptions) browser {
 	ti := textinput.New()
 	ti.Prompt = "/ "
 	ti.PromptStyle = accent
+	ci := textinput.New()
+	ci.Prompt = ": "
+	ci.PromptStyle = accent
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 	sp.Style = accent
-	b := browser{o: o, tabs: make([]tabState, len(o.Views)), cur: o.Start, input: ti, spin: sp, w: 100, h: 30}
+	o.Views = append([]View(nil), o.Views...) // an Open appends: never into the caller's array
+	b := browser{o: o, fixed: len(o.Views), tabs: make([]tabState, len(o.Views)), cur: o.Start, input: ti, cmdIn: ci, spin: sp,
+		gens: new(int), w: 100, h: 30}
+	for i := range b.tabs {
+		b.tabs[i].marks = map[string]bool{}
+	}
 	if o.Start < len(b.tabs) {
 		b.tabs[o.Start].filter = o.Filter
 	}
@@ -199,7 +273,8 @@ func (b *browser) load(tab int) tea.Cmd {
 		t.again = true
 		return nil
 	}
-	t.gen++
+	t.gen = max(*b.gens, t.gen) + 1
+	*b.gens = t.gen
 	t.loading, t.stale, t.again = true, false, false
 	gen, fn := t.gen, b.o.Views[tab].Load
 	s := newLoadStream()
@@ -209,6 +284,49 @@ func (b *browser) load(tab int) tea.Cmd {
 		return nil
 	}
 	return tea.Batch(run, s.next(tab, gen))
+}
+
+// setItems takes a load's rows, sorted by the tab's sort. Once a load is
+// complete, marks of rows that are gone are dropped.
+func (b *browser) setItems(tab int, items []Item, final bool) {
+	t := &b.tabs[tab]
+	t.raw = items
+	t.items = b.sorted(tab, items)
+	if final && len(t.marks) > 0 {
+		keep := map[string]bool{}
+		for _, it := range items {
+			if t.marks[it.Key] {
+				keep[it.Key] = true
+			}
+		}
+		t.marks = keep
+	}
+}
+
+// sorted is items in the tab's sort order (a copy); rows without a Key
+// (skipped clusters) stay last.
+func (b browser) sorted(tab int, items []Item) []Item {
+	t := b.tabs[tab]
+	sorts := b.o.Views[tab].Sorts
+	if t.sort == 0 || t.sort > len(sorts) {
+		return items
+	}
+	cmp := sorts[t.sort-1].Cmp
+	out := append([]Item(nil), items...)
+	sort.SliceStable(out, func(i, j int) bool {
+		a, c := out[i], out[j]
+		if (a.Key == "") != (c.Key == "") {
+			return c.Key == ""
+		}
+		if a.Key == "" {
+			return false
+		}
+		if t.desc {
+			return cmp(c, a) < 0
+		}
+		return cmp(a, c) < 0
+	})
+	return out
 }
 
 func (b browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -223,11 +341,15 @@ func (b browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return b, cmd
 
 	case partialMsg:
+		if msg.tab >= len(b.tabs) {
+			return b, nil
+		}
 		t := &b.tabs[msg.tab]
 		if msg.gen != t.gen || !t.loading {
 			return b, nil
 		}
-		t.items, t.err, t.ready = msg.items, nil, true
+		b.setItems(msg.tab, msg.items, false)
+		t.err, t.ready = nil, true
 		if t.loadedAt.IsZero() && !t.moved { // first rows still coming in sorted: stay on top
 			t.key, t.cursor = "", 0
 		}
@@ -235,6 +357,9 @@ func (b browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return b, msg.s.next(msg.tab, msg.gen)
 
 	case loadedMsg:
+		if msg.tab >= len(b.tabs) {
+			return b, nil
+		}
 		t := &b.tabs[msg.tab]
 		if msg.gen != t.gen {
 			return b, nil
@@ -246,7 +371,8 @@ func (b browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil && len(t.items) > 0 {
 			t.err = msg.err // keep the last good rows; say the refresh failed
 		} else {
-			t.items, t.err = msg.items, msg.err
+			b.setItems(msg.tab, msg.items, msg.err == nil)
+			t.err = msg.err
 		}
 		b.follow(msg.tab)
 		if t.again {
@@ -259,6 +385,9 @@ func (b browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return b, nil
 
 	case refreshMsg:
+		if msg.tab >= len(b.tabs) {
+			return b, nil
+		}
 		t := &b.tabs[msg.tab]
 		if msg.gen != t.gen || t.loading {
 			return b, nil
@@ -285,11 +414,23 @@ func (b browser) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return b.keyFilter(msg)
 		case modeText:
 			return b.keyText(msg)
+		case modeCommand:
+			return b.keyCommand(msg)
+		case modeChoose:
+			return b.keyChoose(msg)
 		}
 		return b.keyList(msg)
 	}
 	return b, nil
 }
+
+// funcExec runs Result.Run as a tea.ExecCommand: with the terminal.
+type funcExec struct{ fn func() error }
+
+func (f funcExec) Run() error        { return f.fn() }
+func (funcExec) SetStdin(io.Reader)  {}
+func (funcExec) SetStdout(io.Writer) {}
+func (funcExec) SetStderr(io.Writer) {}
 
 func (b browser) apply(r Result) (tea.Model, tea.Cmd) {
 	b.status, b.statErr = Clean(r.Status), false
@@ -300,6 +441,17 @@ func (b browser) apply(r Result) (tea.Model, tea.Cmd) {
 	if r.Text != "" {
 		text := strings.ReplaceAll(strings.TrimRight(keepColors(r.Text), "\n"), "\t", "    ")
 		b.text, b.textTtl, b.scroll, b.mode = strings.Split(text, "\n"), Clean(r.TextTitle), 0, modeText
+	}
+	if r.Choose != nil && len(r.Choose.Options) > 0 {
+		b.choice, b.choiceI, b.mode = r.Choose, 0, modeChoose
+	}
+	switch {
+	case r.Open != nil:
+		b.push()
+		b.openTab(*r.Open)
+		r.Goto = len(b.tabs)
+	case r.Goto > 0 && r.Goto <= len(b.tabs) && (r.Goto-1 != b.cur || r.Only != nil || r.Filter != ""):
+		b.push()
 	}
 	if r.Goto > 0 && r.Goto <= len(b.tabs) {
 		b.cur = r.Goto - 1
@@ -315,10 +467,82 @@ func (b browser) apply(r Result) (tea.Model, tea.Cmd) {
 	if r.Exec != nil {
 		cmds = append(cmds, tea.ExecProcess(r.Exec, func(err error) tea.Msg { return execMsg{err} }))
 	}
+	if r.Run != nil {
+		cmds = append(cmds, tea.Exec(funcExec{r.Run}, func(err error) tea.Msg { return execMsg{err} }))
+	}
 	if r.Quit {
 		return b, tea.Quit
 	}
 	return b, tea.Batch(cmds...)
+}
+
+// openTab puts v after the fixed tabs, replacing a tab opened before.
+func (b *browser) openTab(v View) {
+	b.o.Views, b.tabs = b.o.Views[:b.fixed:b.fixed], b.tabs[:b.fixed:b.fixed]
+	b.o.Views = append(b.o.Views, v)
+	b.tabs = append(b.tabs, tabState{marks: map[string]bool{}})
+}
+
+// closeOpened removes the opened tab; the cursor goes back to the fixed tab
+// it was opened from.
+func (b *browser) closeOpened() {
+	if len(b.o.Views) <= b.fixed {
+		return
+	}
+	b.o.Views, b.tabs = b.o.Views[:b.fixed:b.fixed], b.tabs[:b.fixed:b.fixed]
+	if b.cur >= b.fixed {
+		b.cur = 0
+		for i := len(b.history) - 1; i >= 0; i-- {
+			if j := b.tabIndex(b.history[i].tab); j >= 0 {
+				b.cur = j
+				break
+			}
+		}
+	}
+}
+
+func (b browser) tabIndex(name string) int {
+	for i, v := range b.o.Views {
+		if v.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// push remembers where the cursor is, for back.
+func (b *browser) push() {
+	t := b.tabs[b.cur]
+	b.history = append(b.history, navEntry{tab: b.o.Views[b.cur].Name, filter: t.filter, only: t.only, onlyLabel: t.onlyLabel, key: t.key})
+	if len(b.history) > 30 {
+		b.history = b.history[len(b.history)-30:]
+	}
+}
+
+// back returns to where the last Goto came from; the tab left loses the
+// filter the Goto gave it. false: nowhere to go back to.
+func (b *browser) back() (tea.Cmd, bool) {
+	for len(b.history) > 0 {
+		e := b.history[len(b.history)-1]
+		b.history = b.history[:len(b.history)-1]
+		i := b.tabIndex(e.tab)
+		if i < 0 {
+			continue
+		}
+		left := &b.tabs[b.cur]
+		left.filter, left.only, left.onlyLabel = "", nil, ""
+		b.follow(b.cur)
+		t := &b.tabs[i]
+		t.filter, t.only, t.onlyLabel, t.key = e.filter, e.only, e.onlyLabel, e.key
+		b.follow(i)
+		if b.cur >= b.fixed && i < b.fixed { // back from an opened tab: it closes
+			b.o.Views, b.tabs = b.o.Views[:b.fixed:b.fixed], b.tabs[:b.fixed:b.fixed]
+		}
+		m, cmd := b.switchTab(i)
+		*b = m.(browser)
+		return cmd, true
+	}
+	return nil, false
 }
 
 // what names a row in prompts: its Name, or else its label.
@@ -333,10 +557,32 @@ func what(it Item) string {
 	return string(r)
 }
 
-func (b browser) run(view int, it Item, a Action) (tea.Model, tea.Cmd) {
-	b.busy, b.status = a.Label+" "+what(it)+"…", ""
-	key, fn := a.Key, b.o.Action
-	return b, func() tea.Msg { return actionMsg(fn(view, it, key)) }
+func (b browser) run(view int, its []Item, a Action) (tea.Model, tea.Cmd) {
+	key := a.Key
+	if len(its) == 1 {
+		b.busy, b.status = a.Label+" "+what(its[0])+"…", ""
+		it, fn := its[0], b.o.Action
+		return b, func() tea.Msg { return actionMsg(fn(view, it, key)) }
+	}
+	b.busy, b.status = fmt.Sprintf("%s %d objects…", a.Label, len(its)), ""
+	b.tabs[view].marks = map[string]bool{} // done with them, whatever the answer
+	fn := b.o.ActionMany
+	return b, func() tea.Msg { return actionMsg(fn(view, its, key)) }
+}
+
+// marked: the tab's marked rows, in its order.
+func (b browser) marked(tab int) []Item {
+	t := b.tabs[tab]
+	if len(t.marks) == 0 {
+		return nil
+	}
+	var out []Item
+	for _, it := range t.items {
+		if t.marks[it.Key] {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 func (b browser) keyList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -351,7 +597,7 @@ func (b browser) keyList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			b.status, b.statErr = "not run: "+strings.TrimSuffix(b.busy, "…")+" is still running", true
 			return b, nil
 		}
-		return b.run(p.view, p.it, p.act)
+		return b.run(p.view, p.its, p.act)
 	}
 	switch k.String() {
 	case "ctrl+c", "q":
@@ -360,18 +606,75 @@ func (b browser) keyList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case t.filter != "":
 			t.filter, t.cursor, t.offset = "", 0, 0
-		case t.only != nil:
-			t.only, t.onlyLabel, t.cursor, t.offset = nil, "", 0, 0
+		case len(t.marks) > 0:
+			t.marks = map[string]bool{}
 		default:
-			return b, tea.Quit
+			if cmd, ok := b.back(); ok {
+				return b, cmd
+			}
+			switch {
+			case t.only != nil:
+				t.only, t.onlyLabel, t.cursor, t.offset = nil, "", 0, 0
+			case b.cur >= b.fixed:
+				b.closeOpened()
+				return b.switchTab(b.cur)
+			default:
+				return b, tea.Quit
+			}
 		}
 		b.follow(b.cur)
+		return b, nil
+	case "backspace":
+		if cmd, ok := b.back(); ok {
+			return b, cmd
+		}
+		if b.cur >= b.fixed {
+			b.closeOpened()
+			return b.switchTab(b.cur)
+		}
 		return b, nil
 	case "/":
 		b.mode = modeFilter
 		b.input.SetValue(t.filter)
 		b.input.CursorEnd()
 		return b, b.input.Focus()
+	case ":":
+		if b.o.Command == nil {
+			return b, nil
+		}
+		b.mode = modeCommand
+		b.cmdIn.SetValue("")
+		b.sugSel = 0
+		return b, b.cmdIn.Focus()
+	case "?":
+		b.text, b.textTtl, b.scroll, b.mode = strings.Split(b.keysHelp(), "\n"), "keys", 0, modeText
+		return b, nil
+	case " ":
+		if it, ok := b.selected(); ok && it.Key != "" {
+			if t.marks[it.Key] {
+				delete(t.marks, it.Key)
+			} else {
+				t.marks[it.Key] = true
+			}
+			b.move(1)
+		}
+		return b, nil
+	case "ctrl+a": // mark every row shown, or unmark them when they all are
+		rows := b.shown(b.cur)
+		all := true
+		for _, it := range rows {
+			all = all && (it.Key == "" || t.marks[it.Key])
+		}
+		for _, it := range rows {
+			switch {
+			case it.Key == "":
+			case all:
+				delete(t.marks, it.Key)
+			default:
+				t.marks[it.Key] = true
+			}
+		}
+		return b, nil
 	case "tab", "right":
 		return b.switchTab((b.cur + 1) % len(b.tabs))
 	case "shift+tab", "left":
@@ -405,20 +708,42 @@ func (b browser) keyList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return b.switchTab(i)
 		}
 	}
+	for i, s := range b.o.Views[b.cur].Sorts {
+		if s.Key != k.String() {
+			continue
+		}
+		if t.sort == i+1 {
+			t.desc = !t.desc
+		} else {
+			t.sort, t.desc = i+1, s.Desc
+		}
+		t.items = b.sorted(b.cur, t.raw)
+		t.cursor, t.offset, t.key = 0, 0, "" // the top of the new order
+		b.follow(b.cur)
+		return b, nil
+	}
 	// an action of this tab
 	for _, a := range b.o.Views[b.cur].Actions {
 		if a.Key != k.String() {
 			continue
 		}
-		it, ok := b.selected()
-		if !ok || b.busy != "" || it.Key == "" {
+		if b.busy != "" {
+			return b, nil
+		}
+		var its []Item
+		if marked := b.marked(b.cur); a.Multi && len(marked) > 0 && b.o.ActionMany != nil {
+			its = marked
+		} else if it, ok := b.selected(); ok && it.Key != "" {
+			its = []Item{it}
+		}
+		if len(its) == 0 {
 			return b, nil
 		}
 		if a.Confirm {
-			b.confirm = &pending{b.cur, it, a}
+			b.confirm = &pending{b.cur, its, a}
 			return b, nil
 		}
-		return b.run(b.cur, it, a)
+		return b.run(b.cur, its, a)
 	}
 	return b, nil
 }
@@ -459,6 +784,129 @@ func (b browser) keyFilter(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		b.follow(b.cur)
 	}
 	return b, cmd
+}
+
+// suggestions: what Complete offers for the text after ":".
+func (b browser) suggestions() []string {
+	if b.o.Complete == nil {
+		return nil
+	}
+	return b.o.Complete(strings.TrimSpace(b.cmdIn.Value()))
+}
+
+func (b browser) keyCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "esc":
+		b.mode = modeList
+		b.cmdIn.Blur()
+		return b, nil
+	case "ctrl+c":
+		return b, tea.Quit
+	case "up", "ctrl+p", "shift+tab":
+		if b.sugSel > 0 {
+			b.sugSel--
+		}
+		return b, nil
+	case "down", "ctrl+n":
+		if b.sugSel < len(b.suggestions())-1 {
+			b.sugSel++
+		}
+		return b, nil
+	case "tab":
+		if s := b.suggestions(); len(s) > 0 {
+			b.cmdIn.SetValue(suggestionValue(s[min(b.sugSel, len(s)-1)]))
+			b.cmdIn.CursorEnd()
+			b.sugSel = 0
+		}
+		return b, nil
+	case "enter":
+		b.mode = modeList
+		b.cmdIn.Blur()
+		text := strings.TrimSpace(b.cmdIn.Value())
+		// a name typed whole stays; otherwise the highlighted suggestion
+		if s := b.suggestions(); len(s) > 0 && !slices.ContainsFunc(s, func(x string) bool { return suggestionValue(x) == text }) {
+			text = suggestionValue(s[min(b.sugSel, len(s)-1)])
+		}
+		if text == "" || b.busy != "" {
+			return b, nil
+		}
+		b.busy, b.status = ":"+text+"…", ""
+		fn := b.o.Command
+		return b, func() tea.Msg { return actionMsg(fn(text)) }
+	}
+	var cmd tea.Cmd
+	before := b.cmdIn.Value()
+	b.cmdIn, cmd = b.cmdIn.Update(k)
+	if b.cmdIn.Value() != before {
+		b.sugSel = 0
+	}
+	return b, cmd
+}
+
+// suggestionValue is what a suggestion types: its first word.
+func suggestionValue(s string) string {
+	if f := strings.Fields(s); len(f) > 0 {
+		return f[0]
+	}
+	return s
+}
+
+// maxSuggestions is how many suggestions show under the ":" prompt.
+const maxSuggestions = 8
+
+// suggestionLines: the suggestions shown under the ":" prompt, a window
+// around the highlighted one.
+func (b browser) suggestionLines() []string {
+	sg := b.suggestions()
+	if len(sg) == 0 {
+		return nil
+	}
+	sel := min(b.sugSel, len(sg)-1)
+	start := max(0, min(sel-maxSuggestions/2, len(sg)-maxSuggestions))
+	end := min(len(sg), start+maxSuggestions)
+	var out []string
+	for i := start; i < end; i++ {
+		name, rest, _ := strings.Cut(sg[i], " ")
+		line := "  " + name + dim.Render(rest)
+		if i == sel {
+			line = accent.Render("› "+name) + dim.Render(rest)
+		}
+		out = append(out, lipgloss.NewStyle().MaxWidth(b.w).Render(line))
+	}
+	more := ""
+	if len(sg) > end || start > 0 {
+		more = fmt.Sprintf(" · %d of %d", sel+1, len(sg))
+	}
+	out = append(out, dim.Render("  ↑↓ choose · tab completes · enter opens"+more))
+	return out
+}
+
+func (b browser) keyChoose(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ch := b.choice
+	pick := -1
+	switch s := k.String(); s {
+	case "esc", "q":
+		b.mode, b.choice, b.status = modeList, nil, "cancelled"
+		return b, nil
+	case "ctrl+c":
+		return b, tea.Quit
+	case "up", "k":
+		b.choiceI = max(0, b.choiceI-1)
+	case "down", "j", "tab":
+		b.choiceI = min(len(ch.Options)-1, b.choiceI+1)
+	case "enter":
+		pick = b.choiceI
+	default:
+		if len(s) == 1 && s[0] >= '1' && s[0] <= '9' && int(s[0]-'1') < len(ch.Options) {
+			pick = int(s[0] - '1')
+		}
+	}
+	if pick < 0 {
+		return b, nil
+	}
+	b.mode, b.choice = modeList, nil
+	b.busy, b.status = Clean(ch.Options[pick])+"…", ""
+	return b, func() tea.Msg { return actionMsg(ch.Then(pick)) }
 }
 
 func (b browser) keyText(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -572,7 +1020,13 @@ func (b *browser) clampOffset(tab int) {
 	t.offset = max(0, t.offset)
 }
 
-func (b browser) listHeight() int { return max(3, b.h-5) } // tabs, filter/help, header, status
+func (b browser) listHeight() int { // tabs, filter/help, header, status; the ":" suggestions
+	n := b.h - 5
+	if b.mode == modeCommand {
+		n -= len(b.suggestionLines())
+	}
+	return max(3, n)
+}
 
 var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
@@ -598,7 +1052,10 @@ func keepColors(s string) string {
 
 // ── view ───────────────────────────────────────────────────────────────
 
-var tabOn = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("25")).Bold(true)
+var (
+	tabOn     = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("25")).Bold(true)
+	markStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true)
+)
 
 func (b browser) View() string {
 	var s strings.Builder
@@ -614,13 +1071,17 @@ func (b browser) View() string {
 			line += dim.Render(label)
 		}
 	}
+	marks := ""
+	if n := len(t.marks); n > 0 {
+		marks = fmt.Sprintf(" · %d marked", n)
+	}
 	switch {
 	case t.loading && !t.ready:
 		line += "  " + b.spin.View()
 	case t.loading:
-		line += "  " + b.spin.View() + dim.Render(fmt.Sprintf(" %d rows · refreshing", len(b.shown(b.cur))))
+		line += "  " + b.spin.View() + dim.Render(fmt.Sprintf(" %d rows%s · refreshing", len(b.shown(b.cur)), marks))
 	case t.ready:
-		line += dim.Render(fmt.Sprintf("  %d rows · %s", len(b.shown(b.cur)), t.loadedAt.Format("15:04:05")))
+		line += dim.Render(fmt.Sprintf("  %d rows%s · %s", len(b.shown(b.cur)), marks, t.loadedAt.Format("15:04:05")))
 	}
 	s.WriteString(lipgloss.NewStyle().MaxWidth(b.w).Render(line) + "\n")
 
@@ -639,8 +1100,17 @@ func (b browser) View() string {
 	switch {
 	case b.mode == modeFilter:
 		s.WriteString(b.input.View() + "\n")
+	case b.mode == modeCommand:
+		s.WriteString(lipgloss.NewStyle().MaxWidth(b.w).Render(b.cmdIn.View()) + "\n")
+		for _, l := range b.suggestionLines() {
+			s.WriteString(l + "\n")
+		}
 	case len(scope) > 0:
-		s.WriteString(accent.Render(strings.Join(scope, " · ")) + dim.Render("   esc clears") + "\n")
+		back := "   esc clears"
+		if len(b.history) > 0 {
+			back = "   esc back"
+		}
+		s.WriteString(accent.Render(strings.Join(scope, " · ")) + dim.Render(back) + "\n")
 	default:
 		s.WriteString(lipgloss.NewStyle().MaxWidth(b.w).Render(dim.Render(b.help())) + "\n")
 	}
@@ -650,10 +1120,21 @@ func (b browser) View() string {
 	if h := b.o.Views[b.cur].Header; h != nil {
 		header = h()
 	}
+	if sorts := b.o.Views[b.cur].Sorts; t.sort > 0 && t.sort <= len(sorts) {
+		arrow := "↑"
+		if t.desc {
+			arrow = "↓"
+		}
+		header += "   [sort: " + sorts[t.sort-1].Name + " " + arrow + "]"
+	}
 	s.WriteString(lipgloss.NewStyle().MaxWidth(b.w).Render(dim.Render("   "+b.badgePad()+header)) + "\n")
 	h := b.listHeight()
 	var body []string
 	switch {
+	case b.mode == modeChoose && b.choice != nil:
+		body = b.viewChoice()
+	case b.confirm != nil && len(b.confirm.its) > 1:
+		body = b.viewConfirmList(h)
 	case !t.ready:
 		body = []string{"  " + b.spin.View() + " loading…"}
 	case t.err != nil && len(t.items) == 0:
@@ -668,12 +1149,14 @@ func (b browser) View() string {
 	for len(body) < h {
 		body = append(body, "")
 	}
-	s.WriteString(strings.Join(body, "\n") + "\n")
+	s.WriteString(strings.Join(body[:h], "\n") + "\n")
 
 	// status
 	switch {
 	case b.confirm != nil:
 		s.WriteString(Warn.Bold(true).Render(b.confirmText()) + dim.Render("  y to confirm, any other key cancels"))
+	case b.mode == modeChoose:
+		s.WriteString(dim.Render("↑↓ or 1-9, enter picks, esc cancels"))
 	case b.busy != "":
 		s.WriteString(b.spin.View() + " " + dim.Render(b.busy))
 	case b.status != "" && b.statErr:
@@ -686,13 +1169,53 @@ func (b browser) View() string {
 	return s.String()
 }
 
+func (b browser) viewChoice() []string {
+	out := []string{"  " + bold.Render(Clean(b.choice.Title))}
+	for i, o := range b.choice.Options {
+		line := fmt.Sprintf("   %d  %s", i+1, Clean(o))
+		if i == b.choiceI {
+			line = selRow.Render(fmt.Sprintf(" > %d  %s", i+1, Clean(o)))
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// viewConfirmList lists every object a Multi action is about to change.
+func (b browser) viewConfirmList(h int) []string {
+	p := b.confirm
+	out := []string{"  " + Warn.Bold(true).Render(fmt.Sprintf("%s these %d objects?", p.act.Label, len(p.its)))}
+	for i, it := range p.its {
+		if len(out) == h-1 && i < len(p.its)-1 {
+			out = append(out, dim.Render(fmt.Sprintf("   … and %d more", len(p.its)-i)))
+			break
+		}
+		name := what(it)
+		if n, ok := strings.CutSuffix(name, "(PROD)"); ok {
+			name = n + prodTag.Render("PROD")
+		}
+		out = append(out, "   "+name)
+	}
+	return out
+}
+
 // confirmText is the question before a Confirm action: "delete pod
-// default/web-7d9f on use (PROD)?".
+// default/web-7d9f on use (PROD)?", or "delete 3 objects (PROD)?".
 func (b browser) confirmText() string {
-	if b.confirm == nil {
+	p := b.confirm
+	if p == nil {
 		return ""
 	}
-	return b.confirm.act.Label + " " + what(b.confirm.it) + "?"
+	if len(p.its) == 1 {
+		return p.act.Label + " " + what(p.its[0]) + "?"
+	}
+	prod := ""
+	for _, it := range p.its {
+		if strings.HasSuffix(what(it), "(PROD)") {
+			prod = " (PROD)"
+		}
+	}
+	return fmt.Sprintf("%s %d objects%s?", p.act.Label, len(p.its), prod)
 }
 
 func (b browser) help() string {
@@ -704,8 +1227,50 @@ func (b browser) help() string {
 		}
 		parts = append(parts, k+" "+a.Label)
 	}
-	parts = append(parts, "/ filter", "tab/1-9 view", "R reload", "q quit")
+	parts = append(parts, "space mark", "/ filter")
+	if b.o.Command != nil {
+		parts = append(parts, ": kind")
+	}
+	parts = append(parts, "? keys", "q quit")
 	return strings.Join(parts, " · ")
+}
+
+// keysHelp is the "?" page: every key of this tab and of the browser.
+func (b browser) keysHelp() string {
+	v := b.o.Views[b.cur]
+	var s strings.Builder
+	s.WriteString(bold.Render("this tab ("+v.Name+")") + "\n\n")
+	for _, a := range v.Actions {
+		note := ""
+		if a.Multi {
+			note = "   every marked row"
+		}
+		if a.Confirm {
+			note += "   asks y/N first"
+		}
+		fmt.Fprintf(&s, "  %-9s %s%s\n", a.Key, a.Label, dim.Render(note))
+	}
+	for _, so := range v.Sorts {
+		fmt.Fprintf(&s, "  %-9s sort by %s (again: reverse)\n", so.Key, so.Name)
+	}
+	s.WriteString("\n" + bold.Render("everywhere") + "\n\n")
+	general := [][2]string{
+		{"↑↓ j k", "move · pgup/pgdn · g/G top/bottom"},
+		{"space", "mark the row · ctrl+a every row shown (again: none)"},
+		{"/", "filter (every word, any column)"},
+		{"tab 1-9", "switch tab"},
+	}
+	if b.o.Command != nil {
+		general = append(general, [2]string{":", "open another kind: :ingress, :cm, :secret, :crd… (tab completes)"})
+	}
+	general = append(general,
+		[2]string{"esc ⌫", "back to where enter came from · clear the filter or marks · close a : tab"},
+		[2]string{"R", "reload (tries skipped clusters again)"},
+		[2]string{"q", "quit"})
+	for _, g := range general {
+		fmt.Fprintf(&s, "  %-9s %s\n", g[0], g[1])
+	}
+	return s.String()
 }
 
 func (b browser) badgePad() string {
@@ -718,9 +1283,15 @@ func (b browser) badgePad() string {
 }
 
 func (b browser) row(it Item, selected bool) string {
+	marked := it.Key != "" && b.tabs[b.cur].marks[it.Key]
 	cur := "   "
-	if selected {
+	switch {
+	case selected && marked:
+		cur = selRow.Render(" >") + markStyle.Render("●")
+	case selected:
 		cur = selRow.Render(" > ")
+	case marked:
+		cur = "  " + markStyle.Render("●")
 	}
 	tag := ""
 	switch it.Badge {
@@ -739,6 +1310,8 @@ func (b browser) row(it Item, selected bool) string {
 	switch {
 	case selected:
 		label = selRow.Render(plain(label)) // one style for the whole row
+	case marked:
+		label = markStyle.Render(plain(label))
 	case it.Dim:
 		label = dim.Render(plain(label))
 	}

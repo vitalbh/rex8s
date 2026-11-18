@@ -47,20 +47,51 @@ const cfg = `clusters:
 // no terminal on stdin — like an agent or a script.
 func runGuard(t *testing.T, env []string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
+	return runGuardWith(t, guardRun{}, env, args...)
+}
+
+type guardRun struct {
+	// shim: run through links as setup installs them, w/kubectl ->
+	// rex8s-guard -> this test binary; args[0] is the link. The fake tools
+	// stay in bin/, which demo mode puts first on PATH (before Homebrew's:
+	// a real kubectl must never run here), so this checks the dispatch, not
+	// the search (internal/pathx and internal/guard test that).
+	shim  bool
+	extra string // appended to config.yaml
+}
+
+func runGuardWith(t *testing.T, o guardRun, env []string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
-		t.Fatal(err)
+	tools := "bin"
+	for _, d := range []string{"bin", "w"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	fake := "#!/bin/sh\necho \"FAKE $(basename \"$0\") $*\"\n"
 	for _, f := range []struct{ name, data string }{
-		{"bin/kubectl", fake}, {"bin/helm", fake}, {"bin/flux", fake},
-		{"kubeconfig", kubeconfig}, {"config.yaml", cfg},
+		{tools + "/kubectl", fake}, {tools + "/helm", fake}, {tools + "/flux", fake},
+		{"kubeconfig", kubeconfig}, {"config.yaml", cfg + o.extra},
 	} {
 		if err := os.WriteFile(filepath.Join(dir, f.name), []byte(f.data), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command(os.Args[0], args...)
+	exe, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.shim {
+		bin := filepath.Join(dir, "w")
+		for _, l := range [][2]string{{exe, "rex8s-guard"}, {exe, "rex8s"}, {"rex8s-guard", "kubectl"}, {"rex8s-guard", "helm"}, {"rex8s-guard", "flux"}} {
+			if err := os.Symlink(l[0], filepath.Join(bin, l[1])); err != nil {
+				t.Fatal(err)
+			}
+		}
+		exe, args = filepath.Join(bin, args[0]), args[1:]
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.Env = append([]string{
 		"REX8S_GUARD_MAIN=1",
 		"PATH=/usr/bin:/bin",
@@ -72,13 +103,16 @@ func runGuard(t *testing.T, env []string, args ...string) (stdout, stderr string
 	}, env...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
-	err := cmd.Run()
+	err = cmd.Run()
 	if ee, ok := err.(*exec.ExitError); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
 		t.Fatal(err)
 	}
-	return out.String(), errb.String(), code
+	if _, err := os.Stat(filepath.Join(dir, "rex8s", "audit.log")); err == nil && o.extra != "" {
+		stderr = "AUDIT LOG WRITTEN\n"
+	}
+	return out.String(), errb.String() + stderr, code
 }
 
 func TestGuardBinary(t *testing.T) {
@@ -127,5 +161,60 @@ func TestPrompt(t *testing.T) {
 func TestVersion(t *testing.T) {
 	if out, _, code := runGuard(t, nil, "--version"); out != "dev\n" || code != 0 {
 		t.Errorf("--version = %q, exit %d", out, code)
+	}
+}
+
+func TestShimArgs(t *testing.T) {
+	for _, c := range []struct {
+		argv []string
+		tool string
+		ok   bool
+	}{
+		{[]string{"/x/bin/kubectl", "get", "pods"}, "kubectl", true},
+		{[]string{"helm", "list"}, "helm", true},
+		{[]string{"flux", "--version"}, "flux", true},
+		{[]string{"/x/bin/rex8s-guard", "kubectl", "get"}, "", false},
+		{[]string{"rex8s-guard.test"}, "", false},
+	} {
+		tool, args, ok := shimArgs(c.argv)
+		if tool != c.tool || ok != c.ok || (ok && strings.Join(args, " ") != strings.Join(c.argv[1:], " ")) {
+			t.Errorf("shimArgs(%q) = %q %q %v", c.argv, tool, args, ok)
+		}
+	}
+}
+
+// Run as w/kubectl -> rex8s-guard (a link, as setup installs it), the
+// guard is kubectl: same policy, then the real tool (never itself).
+func TestGuardAsLink(t *testing.T) {
+	for _, c := range []struct {
+		args string
+		ran  bool
+	}{
+		{"kubectl get pods", true},
+		{"kubectl delete pod x", false},
+		{"helm upgrade web ./chart", false},
+		{"flux --version", true},
+		{"kubectl --context stg delete pod x", true},
+	} {
+		out, errOut, code := runGuardWith(t, guardRun{shim: true}, nil, strings.Fields(c.args)...)
+		if c.ran {
+			if want := "FAKE " + c.args + "\n"; code != 0 || out != want {
+				t.Errorf("%s: exit %d, stdout %q (want %q), stderr %q", c.args, code, out, want, errOut)
+			}
+			continue
+		}
+		if code != 1 || out != "" || !strings.Contains(errOut, "refused") {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q: want a refusal", c.args, code, out, errOut)
+		}
+	}
+}
+
+// guard: false: everything goes straight to the tool, nothing logged.
+func TestGuardOff(t *testing.T) {
+	for _, o := range []guardRun{{extra: "guard: false\n"}, {shim: true, extra: "guard: false\n"}} {
+		out, errOut, code := runGuardWith(t, o, nil, "kubectl", "delete", "pod", "x")
+		if code != 0 || out != "FAKE kubectl delete pod x\n" || errOut != "" {
+			t.Errorf("shim=%v: exit %d, stdout %q, stderr %q", o.shim, code, out, errOut)
+		}
 	}
 }

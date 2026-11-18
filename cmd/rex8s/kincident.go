@@ -52,6 +52,9 @@ func (a *app) kincident(args []string) error {
 	started := time.Now()
 	label := fmt.Sprintf("incident-%s-%s", c.Short, started.Format("0102-1504"))
 
+	if !rex.Installed() {
+		return errors.New("kincident opens a Rex session, and Rex isn't installed here (kstatus, kwhat and kwarn work in any shell)")
+	}
 	out, err := exec.Command(rex.Bin(), "new", label, "--json").Output()
 	if err != nil {
 		return fmt.Errorf("rex new: %v (is Rex running?)", err)

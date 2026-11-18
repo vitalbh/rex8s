@@ -34,11 +34,12 @@ type app struct {
 }
 
 func main() {
-	if len(os.Args) < 2 {
+	argv := commandArgs(os.Args)
+	if len(argv) < 1 {
 		usage()
 		os.Exit(2)
 	}
-	cmd, args := os.Args[1], os.Args[2:]
+	cmd, args := argv[0], argv[1:]
 	c := lookup(cmd)
 	if c != nil && c.noApp { // demo: before the config, which it changes
 		if err := c.run(nil, args); err != nil {
@@ -62,15 +63,24 @@ func main() {
 	}
 }
 
+// commandArgs: the subcommand and its arguments. Run as a k* command (the
+// links setup installs: kview -> rex8s), the name says which: klogs -n x is
+// rex8s logs -n x. Run as rex8s (or any other name), argv[1] is.
+func commandArgs(argv []string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	if sub, ok := wrapperOf[filepath.Base(argv[0])]; ok {
+		return append([]string{sub}, argv[1:]...)
+	}
+	return argv[1:]
+}
+
 func newApp() (*app, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, err
+	binDir := pathx.SelfDir()
+	if binDir == "" {
+		return nil, errors.New("cannot find the rex8s executable")
 	}
-	if r, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = r
-	}
-	binDir := filepath.Dir(exe)
 	pathx.Fix(binDir)
 
 	cfg, err := config.Load()

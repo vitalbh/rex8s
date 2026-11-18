@@ -18,27 +18,27 @@ func TestUnlock(t *testing.T) {
 	if err := Unlock("use", 15*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmChange([]kube.Context{use}, "kroll"); err != nil || f.asked {
+	if err := ConfirmChange(nil, []kube.Context{use}, "kroll"); err != nil || f.asked {
 		t.Fatalf("unlocked: err=%v asked=%v", err, f.asked)
 	}
 	if !strings.Contains(strings.Join(auditLines(t, log), "\n"), "unlocked\tuse\tkroll") {
 		t.Errorf("audit: %q", auditLines(t, log))
 	}
 	// one cluster unlocked, the other not: asks
-	if err := ConfirmChange([]kube.Context{use, euw}, "kroll"); !errors.Is(err, ErrCancelled) || !f.asked {
+	if err := ConfirmChange(nil, []kube.Context{use, euw}, "kroll"); !errors.Is(err, ErrCancelled) || !f.asked {
 		t.Fatalf("partly unlocked: err=%v asked=%v", err, f.asked)
 	}
 
 	// an agent goes through an unlocked cluster, logged as such
 	f.env["REX8S_AGENT"] = "1"
-	if err := ConfirmChange([]kube.Context{use}, "krun"); err != nil {
+	if err := ConfirmChange(nil, []kube.Context{use}, "krun"); err != nil {
 		t.Fatalf("agent, unlocked: %v", err)
 	}
 	if !strings.Contains(strings.Join(auditLines(t, log), "\n"), "unlocked\tuse\tkrun (agent)") {
 		t.Errorf("audit: %q", auditLines(t, log))
 	}
 	// but not through a locked one
-	if err := ConfirmChange([]kube.Context{euw}, "krun"); !errors.Is(err, ErrRefused) {
+	if err := ConfirmChange(nil, []kube.Context{euw}, "krun"); !errors.Is(err, ErrRefused) {
 		t.Fatalf("agent, locked: %v", err)
 	}
 	delete(f.env, "REX8S_AGENT")

@@ -1,11 +1,16 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"os/signal"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/vitalbh/rex8s/internal/fleet"
@@ -15,13 +20,14 @@ import (
 )
 
 // kview: a k9s-like browser of this pane's cluster (every namespace), or of
-// every cluster with -A. Tabs: pods, workloads, services, jobs, nodes,
-// warnings — each refreshes by itself. Letters act on the row under the
-// cursor (kview_actions.go): logs and shells open in Rex splits, describe
-// and YAML in a viewer, changes (delete, restart, run a CronJob) go through
-// the production guard.
+// every cluster with -A (or of a group or the clusters named). Tabs: pods,
+// workloads, services, jobs, nodes, warnings — each refreshes by itself —
+// and ":KIND" opens one for any other kind (kview_resource.go). Letters act
+// on the row under the cursor, or on every marked row (kview_actions.go):
+// logs and shells open in Rex splits, describe and YAML in a viewer, changes
+// (delete, restart, run a CronJob) go through the production guard.
 //
-//	kview [-A | --context CTX] [pods|workloads|services|jobs|nodes|warnings]
+//	kview [-A [GROUP | CLUSTER[,CLUSTER…]] | --context CTX] [pods|workloads|services|jobs|nodes|warnings]
 type kview struct {
 	a        *app
 	cl       kube.Client
@@ -32,6 +38,21 @@ type kview struct {
 	mu      sync.Mutex
 	objs    map[string]any    // row Key → what it shows (pod, workload, …), from the last load
 	headers map[string]string // view → its column titles, sized by the last load
+
+	metrics *kvMetrics // CPU and memory (nil: no columns filled, as in tests)
+	splits  kvSplits   // the Rex splits it opened
+	api     kvAPI      // kubectl api-resources, for ":"
+
+	// tab is the status on the Rex tab (nil in tests): failing pods,
+	// expired logins.
+	tab     *tabStatus
+	stMu    sync.Mutex
+	podsIn  bool // the pods tab loaded: failing counts
+	failing int
+	expired map[string]bool // cluster short → its login expired in the last load
+
+	out   io.Writer // where changes on many objects print (the terminal)
+	pause func()    // waits for enter after them
 }
 
 func (k *kview) setHeader(view, h string) {
@@ -63,21 +84,43 @@ const (
 	vJobs
 	vNodes
 	vWarnings
+	vResource // the tab ":KIND" opened
 )
 
 var kviewNames = []string{"pods", "workloads", "services", "jobs", "nodes", "warnings"}
 
 // kviewOpts is what kview opens on.
 type kviewOpts struct {
-	all     bool   // -A: every cluster
-	ctxName string // --context ("" with all, or for the pane's cluster)
-	start   int    // the first tab
-	filter  string // its filter
-	ns      string // the namespace the pane is on, for the pane label ("" none)
+	all      bool     // -A: every cluster…
+	clusters []string // …or these (names, short names or groups; "" none)
+	ctxName  string   // --context ("" with all, or for the pane's cluster)
+	start    int      // the first tab
+	filter   string   // its filter
+	ns       string   // the namespace the pane is on, for the pane label ("" none)
+}
+
+// kviewTabArg is the tab an argument names ("svc", "deploy", a prefix), or -1.
+func kviewTabArg(arg string) int {
+	arg = strings.ToLower(arg)
+	switch arg {
+	case "":
+		return -1
+	case "svc":
+		return vServices
+	case "deploy":
+		return vWorkloads
+	}
+	for i, n := range kviewNames {
+		if strings.HasPrefix(n, arg) {
+			return i
+		}
+	}
+	return -1
 }
 
 func parseKviewArgs(args []string) (kviewOpts, error) {
 	var o kviewOpts
+	usage := fmt.Errorf("kview [-A [GROUP | CLUSTER[,CLUSTER…]] | --context CTX] [%s]", strings.Join(kviewNames, "|"))
 	for i := 0; i < len(args); i++ {
 		switch arg := args[i]; {
 		case arg == "-A":
@@ -88,18 +131,20 @@ func parseKviewArgs(args []string) (kviewOpts, error) {
 		case arg == "--filter" && i+1 < len(args): // the first tab starts filtered (⇧⌘K on a namespace)
 			o.filter = args[i+1]
 			i++
-		default:
-			found := false
-			for i, n := range kviewNames {
-				if strings.HasPrefix(n, strings.ToLower(arg)) || (arg == "svc" && n == "services") || (arg == "deploy" && n == "workloads") {
-					o.start, found = i, true
-					break
+		case kviewTabArg(arg) >= 0 && !strings.Contains(arg, ","):
+			o.start = kviewTabArg(arg)
+		case o.all && !strings.HasPrefix(arg, "-"): // kview -A use,euw · kview -A prod
+			for _, n := range strings.Split(arg, ",") {
+				if n = strings.TrimSpace(n); n != "" {
+					o.clusters = append(o.clusters, n)
 				}
 			}
-			if !found {
-				return o, fmt.Errorf("kview [-A | --context CTX] [%s]", strings.Join(kviewNames, "|"))
-			}
+		default:
+			return o, usage
 		}
+	}
+	if o.all && o.ctxName != "" {
+		return o, usage
 	}
 	return o, nil
 }
@@ -112,16 +157,55 @@ func (a *app) kview(args []string) error {
 	return a.runKview(o)
 }
 
+// kviewClusters: every cluster, or the ones names means — each a context,
+// a short name or a group of the config (groups: {prod: [use, euw]}) —
+// each once, in the order given.
+func (a *app) kviewClusters(names []string) ([]kube.Context, error) {
+	if len(names) == 0 {
+		return a.pickClusters(nil)
+	}
+	var expanded []string
+	for _, n := range names {
+		if g, ok := a.cfg.Groups[n]; ok {
+			if len(g) == 0 {
+				return nil, fmt.Errorf("group %s has no clusters", n)
+			}
+			expanded = append(expanded, g...)
+			continue
+		}
+		expanded = append(expanded, n)
+	}
+	cs, err := a.pickClusters(expanded)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	out := cs[:0]
+	for _, c := range cs {
+		if !seen[c.Name] {
+			seen[c.Name] = true
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 // kviewLabel is the pane label: "kview PROD use/payments", "kview euw",
-// "kview PROD all" (-A with a production cluster in it).
-func kviewLabel(clusters []kube.Context, all bool, ns string) string {
+// "kview PROD all" (-A with a production cluster in it), "kview PROD
+// all:use,euw" (-A use,euw; scope is what -A was given). rex8s.lua's ⇧⌘I
+// toggle reads it back: keep the two in step.
+func kviewLabel(clusters []kube.Context, all bool, scope, ns string) string {
 	if all {
+		prod := ""
 		for _, c := range clusters {
 			if c.Prod {
-				return "kview PROD all"
+				prod = "PROD "
 			}
 		}
-		return "kview all"
+		if scope != "" {
+			return "kview " + prod + "all:" + scope
+		}
+		return "kview " + prod + "all"
 	}
 	c := clusters[0]
 	l := c.Short
@@ -140,16 +224,19 @@ func (a *app) runKview(o kviewOpts) error {
 	if err != nil {
 		return err
 	}
-	k := &kview{a: a, cl: r.Client, fleet: r, objs: map[string]any{}, headers: map[string]string{}}
+	k := newKview(a, r)
 	title := ""
 	if o.all {
-		if k.clusters, err = a.pickClusters(nil); err != nil {
+		if k.clusters, err = a.kviewClusters(o.clusters); err != nil {
 			return err
 		}
 		if len(k.clusters) == 0 {
 			return errors.New("no clusters")
 		}
 		k.multi, title = true, fmt.Sprintf("kview · %d clusters", len(k.clusters))
+		if len(o.clusters) > 0 {
+			title = "kview · " + strings.Join(o.clusters, ",")
+		}
 	} else {
 		var c kube.Context
 		if o.ctxName != "" {
@@ -166,9 +253,40 @@ func (a *app) runKview(o kviewOpts) error {
 		}
 		a.tint(c)
 	}
-	rex.Rename(kviewLabel(k.clusters, o.all, o.ns))
+	k.metrics = newKvMetrics(k.cl)
+	k.tab = newTabStatus()
+	rex.Rename(kviewLabel(k.clusters, o.all, strings.Join(o.clusters, ","), o.ns))
+
+	// closing the pane (SIGHUP) still closes the splits it opened
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		if _, ok := <-hup; ok {
+			k.cleanup()
+			os.Exit(1)
+		}
+	}()
+	defer func() {
+		signal.Stop(hup)
+		close(hup)
+		k.cleanup()
+	}()
 	return tui.RunBrowser(tui.BrowserOptions{Title: title, Views: k.views(), Start: o.start, Filter: o.filter,
-		Action: k.action, Reload: k.fleet.Retry})
+		Action: k.action, ActionMany: k.actionMany, Command: k.command, Complete: k.complete, Reload: k.fleet.Retry})
+}
+
+func newKview(a *app, r *fleet.Reader) *kview {
+	return &kview{a: a, cl: r.Client, fleet: r, objs: map[string]any{}, headers: map[string]string{}, expired: map[string]bool{},
+		out: os.Stdout, pause: pressEnter}
+}
+
+// cleanup: what kview leaves behind in Rex goes with it — its splits and
+// its status on the tab.
+func (k *kview) cleanup() {
+	k.splits.closeAll()
+	if k.tab != nil {
+		k.tab.Clear()
+	}
 }
 
 func (k *kview) views() []tui.View {
@@ -180,18 +298,23 @@ func (k *kview) views() []tui.View {
 	}
 	return []tui.View{
 		{Name: "pods", Header: k.header("pods", podHeader), Load: podTab.loader(k), Every: every(5*time.Second, 15*time.Second),
-			Actions: []tui.Action{act("l", "logs"), act("s", "shell"), act("d", "describe"), act("e", "events"), act("y", "yaml"),
-				act("w", "why"), act("a", "ask"), danger("ctrl+d", "delete")}},
+			Actions: []tui.Action{act("enter", "owner"), act("l", "logs"), act("p", "previous logs"), act("s", "shell"), act("d", "describe"),
+				act("e", "events"), act("y", "yaml"), act("w", "why"), act("a", "ask"), many("ctrl+d", "delete")},
+			Sorts: k.sorts(sortName, sortAge, sortStatus, sortRestarts, sortCPU, sortMem)},
 		{Name: "workloads", Header: k.header("workloads", workloadHeader), Load: workloadTab.loader(k), Every: every(10*time.Second, 20*time.Second),
-			Actions: []tui.Action{act("enter", "pods"), act("l", "logs"), danger("r", "restart"), act("d", "describe"), act("y", "yaml")}},
+			Actions: []tui.Action{act("enter", "pods"), act("l", "logs"), many("r", "restart"), act("d", "describe"), act("y", "yaml")},
+			Sorts:   k.sorts(sortName, sortAge, sortStatus)},
 		{Name: "services", Header: k.header("services", serviceHeader), Load: serviceTab.loader(k), Every: 30 * time.Second,
-			Actions: []tui.Action{act("enter", "forward"), act("d", "describe"), act("y", "yaml")}},
+			Actions: []tui.Action{act("enter", "forward"), act("o", "pods"), act("d", "describe"), act("y", "yaml")},
+			Sorts:   k.sorts(sortName)},
 		{Name: "jobs", Header: k.header("jobs", "KIND NAMESPACE/NAME"), Load: jobTab.loader(k), Every: every(15*time.Second, 30*time.Second),
-			Actions: []tui.Action{act("l", "logs"), danger("r", "run now"), act("d", "describe"), act("y", "yaml")}},
+			Actions: []tui.Action{act("l", "logs"), danger("r", "run now"), act("d", "describe"), act("y", "yaml")},
+			Sorts:   k.sorts(sortName)},
 		{Name: "nodes", Header: k.header("nodes", nodeHeader), Load: nodeTab.loader(k), Every: 30 * time.Second,
-			Actions: []tui.Action{act("s", "shell"), act("d", "describe"), act("y", "yaml")}},
+			Actions: []tui.Action{act("enter", "pods"), act("s", "shell"), act("d", "describe"), act("y", "yaml")},
+			Sorts:   k.sorts(sortName, sortAge, sortStatus, sortCPU, sortMem)},
 		{Name: "warnings", Header: k.header("warnings", warningHeader), Load: warningTab.loader(k), Every: every(10*time.Second, 20*time.Second),
-			Actions: []tui.Action{act("enter", "describe")}},
+			Actions: []tui.Action{act("enter", "go to object"), act("d", "describe")}},
 	}
 }
 
@@ -199,6 +322,11 @@ func act(key, label string) tui.Action { return tui.Action{Key: key, Label: labe
 
 // danger: an action that changes the cluster — y/N in the browser first.
 func danger(key, label string) tui.Action { return tui.Action{Key: key, Label: label, Confirm: true} }
+
+// many: a danger that also takes every marked row (one y/N listing them).
+func many(key, label string) tui.Action {
+	return tui.Action{Key: key, Label: label, Confirm: true, Multi: true}
+}
 
 func (k *kview) clusterWidth() int {
 	w := len("CLUSTER")
@@ -262,6 +390,8 @@ type kviewTab[T any] struct {
 	// rows makes the rows of what was read, every cluster together: the
 	// column titles, the rows, and the object behind each row by Key.
 	rows func(k *kview, read []kube.On[T]) (header string, items []tui.Item, objs map[string]any)
+	// metrics: the tab shows CPU and memory of this kind ("pods", "nodes").
+	metrics string
 }
 
 // parseOne parses a single query's answer.
@@ -300,6 +430,9 @@ func (t kviewTab[T]) loader(k *kview) func(partial func([]tui.Item)) ([]tui.Item
 			return append(items, tail...)
 		}
 		res := fleet.ReadEach(k.fleet, k.clusters, t.queries, t.parse, func(c kube.Context, rows []kube.On[T], skip *fleet.Skip) {
+			if skip == nil && t.metrics != "" && k.metrics != nil {
+				k.metrics.refresh(c, t.metrics) // in the background, at most every metricsEvery
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			if skip != nil {
@@ -311,13 +444,18 @@ func (t kviewTab[T]) loader(k *kview) func(partial func([]tui.Item)) ([]tui.Item
 				partial(build(false))
 			}
 		})
+		k.noteSkips(res.Skipped, len(res.Skipped) < len(k.clusters))
 		if res.OK == 0 && len(res.Skipped) > 0 {
 			return nil, errors.New(strings.Join(res.Strings(), " · "))
 		}
 		mu.Lock()
 		defer mu.Unlock()
 		prev = fresh
-		return build(true), nil
+		items := build(true)
+		if t.view == "pods" {
+			k.noteFailing(items)
+		}
+		return items, nil
 	}
 }
 
@@ -331,12 +469,198 @@ func skipRow(s fleet.Skip) tui.Item {
 	return it
 }
 
+// ── the Rex tab's status ───────────────────────────────────────────────
+
+// noteSkips records which clusters' logins expired in a load (some of the
+// clusters answered: the others are fine).
+func (k *kview) noteSkips(skips []fleet.Skip, someAnswered bool) {
+	k.stMu.Lock()
+	expired := map[string]bool{}
+	for _, s := range skips {
+		if s.Expired {
+			expired[s.Cluster.Short] = true
+		}
+	}
+	if someAnswered || len(expired) > 0 {
+		k.expired = expired
+	}
+	k.stMu.Unlock()
+	k.report()
+}
+
+// noteFailing counts the pods that fail (FAIL rows) after a pods load.
+func (k *kview) noteFailing(items []tui.Item) {
+	n := 0
+	for _, it := range items {
+		if it.Key != "" && it.Badge == "FAIL" {
+			n++
+		}
+	}
+	k.stMu.Lock()
+	k.failing, k.podsIn = n, true
+	k.stMu.Unlock()
+	k.report()
+}
+
+// statusText is the short status of the Rex tab: "3 failing · login expired:
+// sa" ("" when all is well).
+func (k *kview) statusText() string {
+	var parts []string
+	if k.failing > 0 {
+		parts = append(parts, fmt.Sprintf("%d failing", k.failing))
+	}
+	if len(k.expired) > 0 {
+		var names []string
+		for n := range k.expired {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		if k.multi {
+			parts = append(parts, "login expired: "+strings.Join(names, ","))
+		} else {
+			parts = append(parts, "login expired")
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// report puts the status on the Rex tab (tabStatus sends it only when it
+// changed): an expired login blocks (kauth), failing pods are an error,
+// otherwise idle once the pods tab has loaded.
+func (k *kview) report() {
+	if k.tab == nil {
+		return
+	}
+	k.stMu.Lock()
+	msg, expired, podsIn := k.statusText(), len(k.expired) > 0, k.podsIn
+	k.stMu.Unlock()
+	switch {
+	case expired:
+		k.tab.Blocked("auth", "kview: "+msg)
+	case msg != "":
+		k.tab.Set("error", "kview: "+msg)
+	case podsIn:
+		k.tab.Set("idle", "kview: no failing pods")
+	}
+}
+
+// ── sorting ────────────────────────────────────────────────────────────
+
+const (
+	sortName = iota
+	sortAge
+	sortStatus
+	sortRestarts
+	sortCPU
+	sortMem
+)
+
+// sorts are the tab's sort keys, k9s-like: shift+N name, A age, S status,
+// T restarts, C CPU, M memory.
+func (k *kview) sorts(which ...int) []tui.SortKey {
+	all := map[int]tui.SortKey{
+		sortName:     {Key: "N", Name: "name", Cmp: k.cmpBy(func(v kvSortable) string { return v.name })},
+		sortAge:      {Key: "A", Name: "age", Desc: false, Cmp: k.cmpNum(func(v kvSortable) int64 { return -v.created.Unix() })},
+		sortStatus:   {Key: "S", Name: "status", Cmp: k.cmpBy(func(v kvSortable) string { return v.status })},
+		sortRestarts: {Key: "T", Name: "restarts", Desc: true, Cmp: k.cmpNum(func(v kvSortable) int64 { return v.restarts })},
+		sortCPU:      {Key: "C", Name: "cpu", Desc: true, Cmp: k.cmpNum(func(v kvSortable) int64 { return v.cpu })},
+		sortMem:      {Key: "M", Name: "memory", Desc: true, Cmp: k.cmpNum(func(v kvSortable) int64 { return v.mem })},
+	}
+	out := make([]tui.SortKey, len(which))
+	for i, w := range which {
+		out[i] = all[w]
+	}
+	return out
+}
+
+// kvSortable is what the sort keys compare of a row's object.
+type kvSortable struct {
+	name     string // namespace/name, then cluster
+	created  time.Time
+	status   string // the worst first: "0…" failing, "1…" waiting, "2…" fine
+	restarts int64
+	cpu, mem int64 // -1: no metrics
+}
+
+func (k *kview) sortable(it tui.Item) kvSortable {
+	o, ok := k.obj(it.Key)
+	if !ok {
+		return kvSortable{name: it.Key, cpu: -1, mem: -1}
+	}
+	rank := func(badge string) string {
+		switch badge {
+		case "FAIL":
+			return "0"
+		case "WAIT":
+			return "1"
+		}
+		return "2"
+	}
+	v := kvSortable{cpu: -1, mem: -1}
+	switch o := o.(type) {
+	case kube.On[kube.Pod]:
+		p := o.V
+		v = kvSortable{name: p.Namespace + "/" + p.Name + "|" + o.C.Short, created: p.Created, status: rank(p.Badge()) + p.Status(),
+			restarts: int64(p.Restarts), cpu: -1, mem: -1}
+		if u, ok := k.metrics.pod(o.C, p.Namespace, p.Name); ok {
+			v.cpu, v.mem = u.cpuM, u.memB
+		}
+	case kube.On[kube.Workload]:
+		w := o.V
+		st := "2"
+		if w.Ready < w.Desired {
+			st = "1"
+			if w.Ready == 0 {
+				st = "0"
+			}
+		}
+		v.name, v.created, v.status = w.Namespace+"/"+w.Name+"|"+o.C.Short, w.Created, st+w.Kind
+	case kube.On[kube.Service]:
+		v.name = o.V.Namespace + "/" + o.V.Name + "|" + o.C.Short
+	case kvJob:
+		if o.job != nil {
+			v.name = o.job.Namespace + "/" + o.job.Name + "|" + o.c.Short
+		} else {
+			v.name = o.cron.Namespace + "/" + o.cron.Name + "|" + o.c.Short
+		}
+	case kube.On[kube.Node]:
+		n := o.V
+		st := "2"
+		if !n.Ready {
+			st = "0"
+		} else if n.Unschedulable || len(n.Pressure) > 0 {
+			st = "1"
+		}
+		v.name, v.created, v.status = n.Name+"|"+o.C.Short, n.Created, st
+		if u, ok := k.metrics.node(o.C, n.Name); ok {
+			v.cpu, v.mem = u.cpuM, u.memB
+		}
+	case kvRes:
+		v.name, v.created = o.ns+"/"+o.name+"|"+o.c.Short, o.created
+	}
+	return v
+}
+
+func (k *kview) cmpBy(f func(kvSortable) string) func(a, b tui.Item) int {
+	return func(a, b tui.Item) int {
+		x, y := k.sortable(a), k.sortable(b)
+		return cmp.Compare(f(x), f(y)) // ties keep the load's order: by name
+	}
+}
+
+func (k *kview) cmpNum(f func(kvSortable) int64) func(a, b tui.Item) int {
+	return func(a, b tui.Item) int {
+		x, y := k.sortable(a), k.sortable(b)
+		return cmp.Compare(f(x), f(y)) // ties keep the load's order: by name
+	}
+}
+
 // ── pods ───────────────────────────────────────────────────────────────
 
 const podHeader = "NAMESPACE/NAME"
 
 var podTab = kviewTab[kube.Pod]{
-	view: "pods", prefix: "pod|",
+	view: "pods", prefix: "pod|", metrics: "pods",
 	queries: [][]string{{"get", "pods", "-A", "-o", "json"}},
 	parse:   parseOne(kube.ParsePods),
 	rows: func(k *kview, rows []kube.On[kube.Pod]) (string, []tui.Item, map[string]any) {
@@ -345,15 +669,19 @@ var podTab = kviewTab[kube.Pod]{
 		for _, r := range rows {
 			w = max(w, len(r.V.Namespace)+1+len(r.V.Name))
 		}
-		header := fmt.Sprintf("%-*s  %-4s %-18s %3s  %s", w, podHeader, "READY", "STATUS", "RST", "AGE")
+		header := fmt.Sprintf("%-*s  %-4s %-18s %3s  %-6s %-7s %s", w, podHeader, "READY", "STATUS", "RST", "CPU", "MEM", "AGE")
 		objs := map[string]any{}
 		items := make([]tui.Item, 0, len(rows))
 		for _, r := range rows {
 			ref := r.V.Namespace + "/" + r.V.Name
 			key := "pod|" + r.C.Name + "|" + ref
 			objs[key] = r
-			cells := fmt.Sprintf("%-*s  %-5s %-18s %3d  %s", w, ref, fmt.Sprintf("%d/%d", r.V.Ready, r.V.Total),
-				r.V.Status(), r.V.Restarts, kube.Age(r.V.Created))
+			cpu, mem := "-", "-"
+			if u, ok := k.metrics.pod(r.C, r.V.Namespace, r.V.Name); ok {
+				cpu, mem = u.cpu, u.mem
+			}
+			cells := fmt.Sprintf("%-*s  %-5s %-18s %3d  %-6s %-7s %s", w, ref, fmt.Sprintf("%d/%d", r.V.Ready, r.V.Total),
+				r.V.Status(), r.V.Restarts, cpu, mem, kube.Age(r.V.Created))
 			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Badge: r.V.Badge(), Name: kvName(r.C, "pod", ref)})
 		}
 		return header, items, objs
@@ -482,7 +810,7 @@ var jobTab = kviewTab[jobsAndCrons]{
 const nodeHeader = "NAME"
 
 var nodeTab = kviewTab[kube.Node]{
-	view: "nodes", prefix: "node|",
+	view: "nodes", prefix: "node|", metrics: "nodes",
 	queries: [][]string{{"get", "nodes", "-o", "json"}},
 	parse:   parseOne(kube.ParseNodes),
 	rows: func(k *kview, rows []kube.On[kube.Node]) (string, []tui.Item, map[string]any) {
@@ -491,7 +819,7 @@ var nodeTab = kviewTab[kube.Node]{
 		for _, r := range rows {
 			w, rw, vw = max(w, len(r.V.Name)), max(rw, len(strings.Join(r.V.Roles, ","))), max(vw, len(r.V.Version))
 		}
-		header := fmt.Sprintf("%-*s  %-*s %-*s %-5s %s", w, nodeHeader, rw, "ROLES", vw, "VERSION", "AGE", "STATUS")
+		header := fmt.Sprintf("%-*s  %-*s %-*s %-5s %-11s %-12s %s", w, nodeHeader, rw, "ROLES", vw, "VERSION", "AGE", "CPU", "MEM", "STATUS")
 		objs := map[string]any{}
 		items := make([]tui.Item, 0, len(rows))
 		for _, r := range rows {
@@ -513,7 +841,12 @@ var nodeTab = kviewTab[kube.Node]{
 					badge = "WAIT"
 				}
 			}
-			cells := fmt.Sprintf("%-*s  %-*s %-*s %-5s %s", w, r.V.Name, rw, orDash(strings.Join(r.V.Roles, ",")), vw, r.V.Version, kube.Age(r.V.Created), state)
+			cpu, mem := "-", "-"
+			if u, ok := k.metrics.node(r.C, r.V.Name); ok {
+				cpu, mem = u.cpu+" "+u.cpuPct, u.mem+" "+u.memPct
+			}
+			cells := fmt.Sprintf("%-*s  %-*s %-*s %-5s %-11s %-12s %s", w, r.V.Name, rw, orDash(strings.Join(r.V.Roles, ",")), vw, r.V.Version,
+				kube.Age(r.V.Created), cpu, mem, state)
 			items = append(items, tui.Item{Key: key, Label: k.row(r.C, cells), Badge: badge, Name: kvName(r.C, "node", r.V.Name)})
 		}
 		return header, items, objs

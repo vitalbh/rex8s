@@ -53,7 +53,7 @@ func (a *app) kroll(args []string) error {
 	for _, t := range targets {
 		touched = append(touched, t.c)
 	}
-	if ok, err := confirmChange(touched, fmt.Sprintf("kroll: rollout restart %d workload(s)", len(targets))); !ok {
+	if ok, err := a.confirmChange(touched, fmt.Sprintf("kroll: rollout restart %d workload(s)", len(targets))); !ok {
 		return err
 	}
 	fmt.Println()

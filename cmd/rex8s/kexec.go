@@ -59,7 +59,7 @@ func (a *app) exectail(ctxName, ns, podName, container string) error {
 	if container != "" {
 		target += " -c " + container
 	}
-	if ok, err := confirmChange([]kube.Context{c}, "kexec: kubectl exec -it "+target+" ("+ns+")"); !ok {
+	if ok, err := a.confirmChange([]kube.Context{c}, "kexec: kubectl exec -it "+target+" ("+ns+")"); !ok {
 		return err
 	}
 	cl, err := a.client(a.src)

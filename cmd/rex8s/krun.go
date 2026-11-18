@@ -70,7 +70,7 @@ func (a *app) krun(args []string) error {
 		touched = append(touched, t.c)
 		fmt.Printf("  %-10s %s %s/%s · %d pod(s)%s\n", t.c.Short, kube.ShortKind(t.Kind), t.Namespace, t.Name, perTarget[t.key()], tag)
 	}
-	if ok, err := confirmChange(touched, fmt.Sprintf("krun: run %q in %d pod(s)", cmdText, len(pods))); !ok {
+	if ok, err := a.confirmChange(touched, fmt.Sprintf("krun: run %q in %d pod(s)", cmdText, len(pods))); !ok {
 		return err
 	}
 	return printRunResults(pods, execInPods(cl, pods, container, command))

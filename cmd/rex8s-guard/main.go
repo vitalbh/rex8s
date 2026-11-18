@@ -1,6 +1,8 @@
 // rex8s-guard TOOL ARGS... — the kubectl/helm/flux wrapper used in rex8s
-// panes: asks for confirmation before mutating production. A separate binary
-// with no TUI dependencies, so it doesn't slow down every kubectl.
+// panes: asks for confirmation before mutating production. setup links
+// kubectl, helm and flux to it; run under one of those names it is that tool
+// (kubectl get pods = rex8s-guard kubectl get pods). A separate binary with
+// no TUI dependencies, so it doesn't slow down every kubectl.
 package main
 
 import (
@@ -19,6 +21,10 @@ import (
 var version = "dev"
 
 func main() {
+	if tool, args, ok := shimArgs(os.Args); ok { // run as kubectl, helm or flux
+		run(tool, args)
+		return
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "--prompt" {
 		prompt(os.Args[2:])
 		return
@@ -31,16 +37,32 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: rex8s-guard kubectl|helm|flux ARGS...")
 		os.Exit(2)
 	}
-	demo.Apply()
-	exe, _ := os.Executable()
-	if r, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = r
+	run(os.Args[1], os.Args[2:])
+}
+
+// shimArgs: run through a link named kubectl, helm or flux (kubectl ->
+// rex8s-guard, which setup installs), the name is the tool and every
+// argument is the tool's: kubectl get pods = rex8s-guard kubectl get pods.
+func shimArgs(argv []string) (tool string, args []string, ok bool) {
+	if len(argv) == 0 {
+		return "", nil, false
 	}
-	binDir := filepath.Dir(exe)
+	switch b := filepath.Base(argv[0]); b {
+	case "kubectl", "helm", "flux":
+		return b, argv[1:], true
+	}
+	return "", nil, false
+}
+
+// run hands tool and args to the guard; it only returns on an error (the
+// tool replaces this process).
+func run(tool string, args []string) {
+	demo.Apply()
+	binDir := pathx.SelfDir()
 	pathx.Fix(binDir)
 	cfg, err := config.Load()
 	if err == nil {
-		err = guard.Run(os.Args[1], os.Args[2:], binDir, cfg)
+		err = guard.Run(tool, args, binDir, cfg)
 	}
 	fmt.Fprintln(os.Stderr, "rex8s-guard:", err)
 	os.Exit(1)

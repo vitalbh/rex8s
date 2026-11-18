@@ -12,21 +12,25 @@ local function check(r, err) if err ~= nil then error(err, 0) end; return r end
 local function opened(w, err) w = check(w, err); return { window_id = w and w.window_id } end
 local function with_ns(argv, ns) if ns and ns ~= "" then argv[#argv + 1] = ns end; return argv end
 
+-- show the tab an action just opened. The app shows a new tab only when
+-- asked to; this works when the action comes from the app itself (key
+-- binding, palette), not from the API (Raycast shows it itself).
+local function show(ctx, w)
+  if w and w.window_id and ctx.origin ~= "api" then
+    -- A client action queued here runs before the app has received the
+    -- new window, so it would be ignored. Queue k8s_focus_window instead:
+    -- the app sends it back to the server (a round trip, after the window
+    -- reached it), and that action queues the select.
+    pcall(rex.client.queue, "k8s_focus_window", { window_id = w.window_id })
+  end
+  return { window_id = w and w.window_id }
+end
+
 -- new tab with the cluster picker; the tab becomes the cluster (or the kview
 -- layout), or closes on esc
 local function picker(mode)
   return function(ctx, args)
-    local w = check(rex.session.new_window{ layout = term({ K8S, "pick", mode }, "k8s") })
-    -- the app shows the new tab only when asked to; works when the action
-    -- comes from the app itself (key binding, palette)
-    if w and w.window_id and ctx.origin ~= "api" then
-      -- A client action queued here runs before the app has received the
-      -- new window, so it would be ignored. Queue k8s_focus_window instead:
-      -- the app sends it back to the server (a round trip, after the window
-      -- reached it), and that action queues the select.
-      pcall(rex.client.queue, "k8s_focus_window", { window_id = w.window_id })
-    end
-    return { window_id = w and w.window_id }
+    return show(ctx, check(rex.session.new_window{ layout = term({ K8S, "pick", mode }, "k8s") }))
   end
 end
 
@@ -224,12 +228,7 @@ rex.action{
   name = "k8s_multi_pick", title = "Kubernetes: Clusters Side by Side…", category = "Kubernetes",
   keywords = "k8s multi clusters compare side by side kmulti",
   run  = function(ctx, args)
-    local w = check(rex.session.new_window{ layout = term({ K8S, "kmulti", "--close" }, "kmulti") })
-    -- show the picker tab (same round trip as k8s_pick)
-    if w and w.window_id and ctx.origin ~= "api" then
-      pcall(rex.client.queue, "k8s_focus_window", { window_id = w.window_id })
-    end
-    return { window_id = w and w.window_id }
+    return show(ctx, check(rex.session.new_window{ layout = term({ K8S, "kmulti", "--close" }, "kmulti") }))
   end,
 }
 
@@ -291,14 +290,14 @@ rex.action{ name = "k8s_restore", title = "Kubernetes: Restore Cluster Tabs", ca
 rex.action{ name = "k8s_flux_monitor", title = "Kubernetes: Flux Monitor", category = "Kubernetes",
             keywords = "k8s flux monitor gitops health",
             run = function(ctx, args)
-              return opened(rex.session.new_window{ layout = term({ K8S, "monitor" }, "flux monitor") })
+              return show(ctx, check(rex.session.new_window{ layout = term({ K8S, "monitor" }, "flux monitor") }))
             end }
 
 -- new tab: kview on every cluster (k9s-like browser), no picker
 rex.action{ name = "k8s_view_all", title = "Kubernetes: All Clusters (kview)", category = "Kubernetes",
             keywords = "k8s kview k9s browse pods workloads every cluster",
             run = function(ctx, args)
-              return opened(rex.session.new_window{ layout = term({ K8S, "kview", "-A" }, "kview") })
+              return show(ctx, check(rex.session.new_window{ layout = term({ K8S, "kview", "-A" }, "kview") }))
             end }
 
 -- a floating pane in this tab running a rex8s picker; it closes when the
@@ -352,7 +351,8 @@ local function pane_of(b)
   local short, ns = rest:match("^([^/%s]+)/(%S+)$")
   short = short or rest:match("^([^/%s]+)$")
   if not short then return nil end
-  if view and short == "all" and not ns then return { view = true, all = true } end
+  -- kview -A: "all", or "all:use,euw" / "all:GROUP" for some of them
+  if view and not ns and (short == "all" or short:match("^all:")) then return { view = true, all = true } end
   local p = { view = view, short = short, ns = ns, ctx = short }
   if not view then
     local f = io.open(STATE .. tostring(b.block_id):gsub("^block:", "") .. ".json", "r")

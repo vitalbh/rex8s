@@ -99,7 +99,7 @@ func (a *app) kjunk(args []string) error {
 		touched = append(touched, j.c)
 		fmt.Printf("  %-8s %-5s %s%s\n", j.c.Short, j.cat, j.ref(), tag)
 	}
-	if ok, err := confirmChange(touched, fmt.Sprintf("kjunk: delete %d object(s)", len(chosen))); !ok {
+	if ok, err := a.confirmChange(touched, fmt.Sprintf("kjunk: delete %d object(s)", len(chosen))); !ok {
 		return err
 	}
 	return deleteJunk(cl, chosen)

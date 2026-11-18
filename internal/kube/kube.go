@@ -3,7 +3,9 @@
 package kube
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,7 +35,11 @@ type Context struct {
 // entries with the same name).
 func Load(path string) (*api.Config, error) {
 	if !strings.Contains(path, string(os.PathListSeparator)) {
-		return clientcmd.LoadFromFile(path)
+		raw, err := clientcmd.LoadFromFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("no kubeconfig at %s: set KUBECONFIG, or kubeconfig: in rex8s's config.yaml (rex8s config)", path)
+		}
+		return raw, err
 	}
 	rules := &clientcmd.ClientConfigLoadingRules{Precedence: filepath.SplitList(path)}
 	return rules.Load()
@@ -173,6 +179,12 @@ func Current(cfg *config.Config, ctxOverride, kubeconfigOverride string) (Contex
 	name := raw.CurrentContext
 	if ctxOverride != "" {
 		name = ctxOverride
+	}
+	if name == "" {
+		if len(raw.Contexts) == 0 {
+			return Context{}, errors.New("no clusters: the kubeconfig has no contexts (KUBECONFIG, or ~/.kube/config)")
+		}
+		return Context{}, errors.New("no current context: pick one with rex8s use-context CTX (or pass --context CTX)")
 	}
 	c, ok := raw.Contexts[name]
 	if !ok {

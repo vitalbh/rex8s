@@ -39,7 +39,7 @@ func (a *app) nettail(ctxName, ns string) error {
 	if image == "" {
 		image = netDebugImage
 	}
-	if ok, err := confirmChange([]kube.Context{c}, "knet: kubectl run "+image+" in "+ns, "a temporary pod with network tools; removed when you exit"); !ok {
+	if ok, err := a.confirmChange([]kube.Context{c}, "knet: kubectl run "+image+" in "+ns, "a temporary pod with network tools; removed when you exit"); !ok {
 		return err
 	}
 	cl, err := a.client(a.src)

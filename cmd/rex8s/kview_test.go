@@ -26,7 +26,7 @@ var (
 
 // fakeKview is a kview -A on kvProd and kvDev whose kubectl answers `get
 // RESOURCE` with replies["<context>-<resource>.json"] ({"items":[]} when
-// missing). Its kubectl is also where the guard would be (binDir).
+// missing). Its directory is binDir, with a stand-in rex8s-guard.
 func fakeKview(t *testing.T, replies map[string]string) *kview {
 	t.Helper()
 	k := testkube.New(t).Default(testkube.Reply{Stdout: `{"items":[]}`})
@@ -42,9 +42,19 @@ func fakeKview(t *testing.T, replies map[string]string) *kview {
 			t.Fatalf("fakeKview: %q names no cluster", name)
 		}
 	}
+	fakeGuard(t, k.Dir)
 	r := &fleet.Reader{Client: kube.Client{Kubectl: k.Path, Kubeconfig: k.Kubeconfig, Timeout: 5 * time.Second}}
 	return &kview{a: &app{binDir: k.Dir, src: k.Kubeconfig}, cl: r.Client, fleet: r,
 		clusters: []kube.Context{kvProd, kvDev}, multi: true, objs: map[string]any{}, headers: map[string]string{}}
+}
+
+// fakeGuard puts a stand-in rex8s-guard in dir (binDir): kview's changes
+// run rex8s-guard kubectl …; tests only check the argv.
+func fakeGuard(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "rex8s-guard"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func colors(t *testing.T) {
@@ -218,7 +228,7 @@ func TestKviewPartialKeepsSlowClusters(t *testing.T) {
 func TestKviewActionArgv(t *testing.T) {
 	t.Setenv("REX_BLOCK", "")
 	k := fakeKview(t, nil)
-	guard := filepath.Join(k.a.binDir, "kubectl")
+	guard := filepath.Join(k.a.binDir, "rex8s-guard")
 	pod := kube.On[kube.Pod]{C: kvProd, V: kube.Pod{Namespace: "default", Name: "web-7d9f", Containers: []string{"app", "proxy"}}}
 	wl := kube.On[kube.Workload]{C: kvProd, V: kube.Workload{Kind: "Deployment", Namespace: "default", Name: "web"}}
 	cron := kube.CronJob{Namespace: "default", Name: "export"}
@@ -231,10 +241,10 @@ func TestKviewActionArgv(t *testing.T) {
 			t.Fatalf("no command: %+v", r)
 		}
 		a := r.Exec.Args
-		if a[0] != "/bin/sh" || a[1] != "-c" || a[3] != guard {
-			t.Fatalf("not through the guard: %q", a)
+		if a[0] != "/bin/sh" || a[1] != "-c" || a[3] != guard || a[4] != "kubectl" {
+			t.Fatalf("not through rex8s-guard kubectl: %q", a)
 		}
-		return a[4:]
+		return a[5:]
 	}
 	cases := []struct {
 		r    tui.Result
@@ -259,8 +269,13 @@ func TestKviewActionArgv(t *testing.T) {
 		t.Errorf("a Job without a CronJob reran: %+v", r)
 	}
 
-	// outside Rex, logs run here: rex8s _logs CTX NS POD *
+	// outside Rex, logs run here: rex8s _logs CTX NS POD * (all containers,
+	// the first choice)
 	r := k.podAction(pod, "l")
+	if r.Choose == nil || len(r.Choose.Options) != 3 {
+		t.Fatalf("logs of a pod with two containers should ask which: %+v", r)
+	}
+	r = r.Choose.Then(0)
 	if r.Exec == nil || !slices.Equal(r.Exec.Args[1:], []string{"_logs", kvProd.Name, "default", "web-7d9f", "*"}) {
 		t.Errorf("logs: %+v", r)
 	}
@@ -284,19 +299,22 @@ func TestKviewTextIsCleaned(t *testing.T) {
 
 func TestKviewLabel(t *testing.T) {
 	cases := []struct {
-		cs   []kube.Context
-		all  bool
-		ns   string
-		want string
+		cs    []kube.Context
+		all   bool
+		scope string
+		ns    string
+		want  string
 	}{
-		{[]kube.Context{kvProd}, false, "payments", "kview PROD production-eu-west/payments"},
-		{[]kube.Context{kvDev}, false, "", "kview use"},
-		{[]kube.Context{kvDev}, false, "payments", "kview use/payments"},
-		{[]kube.Context{kvDev, kvProd}, true, "", "kview PROD all"},
-		{[]kube.Context{kvDev}, true, "", "kview all"},
+		{[]kube.Context{kvProd}, false, "", "payments", "kview PROD production-eu-west/payments"},
+		{[]kube.Context{kvDev}, false, "", "", "kview use"},
+		{[]kube.Context{kvDev}, false, "", "payments", "kview use/payments"},
+		{[]kube.Context{kvDev, kvProd}, true, "", "", "kview PROD all"},
+		{[]kube.Context{kvDev}, true, "", "", "kview all"},
+		{[]kube.Context{kvDev, kvProd}, true, "use,production-eu-west", "", "kview PROD all:use,production-eu-west"},
+		{[]kube.Context{kvDev}, true, "dev", "", "kview all:dev"},
 	}
 	for _, c := range cases {
-		if got := kviewLabel(c.cs, c.all, c.ns); got != c.want {
+		if got := kviewLabel(c.cs, c.all, c.scope, c.ns); got != c.want {
 			t.Errorf("kviewLabel = %q, want %q", got, c.want)
 		}
 	}

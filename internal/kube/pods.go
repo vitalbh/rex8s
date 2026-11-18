@@ -21,7 +21,13 @@ type Pod struct {
 	Created    time.Time
 	Containers []string
 	Labels     map[string]string
+	Node       string   // spec.nodeName ("" while unscheduled)
+	Owner      OwnerRef // the controller owner reference (Kind "" when none)
 }
+
+// OwnerRef is an object's controller: a ReplicaSet, StatefulSet, DaemonSet,
+// Job, Node (static pods)…
+type OwnerRef struct{ Kind, Name string }
 
 // ParsePods parses `kubectl get pods -o json`. Reason is the most telling
 // one: Terminating, the pod's own reason, or the first waiting (or, while
@@ -35,8 +41,14 @@ func ParsePods(data []byte) ([]Pod, error) {
 				Labels            map[string]string `json:"labels"`
 				CreationTimestamp time.Time         `json:"creationTimestamp"`
 				DeletionTimestamp *string           `json:"deletionTimestamp"`
+				OwnerReferences   []struct {
+					Kind       string `json:"kind"`
+					Name       string `json:"name"`
+					Controller bool   `json:"controller"`
+				} `json:"ownerReferences"`
 			} `json:"metadata"`
 			Spec struct {
+				NodeName   string `json:"nodeName"`
 				Containers []struct {
 					Name string `json:"name"`
 				} `json:"containers"`
@@ -70,7 +82,12 @@ func ParsePods(data []byte) ([]Pod, error) {
 	out := make([]Pod, 0, len(list.Items))
 	for _, it := range list.Items {
 		p := Pod{Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Phase: it.Status.Phase, Reason: it.Status.Reason,
-			Created: it.Metadata.CreationTimestamp, Total: len(it.Spec.Containers), Labels: it.Metadata.Labels}
+			Created: it.Metadata.CreationTimestamp, Total: len(it.Spec.Containers), Labels: it.Metadata.Labels, Node: it.Spec.NodeName}
+		for _, o := range it.Metadata.OwnerReferences {
+			if o.Controller || p.Owner.Kind == "" {
+				p.Owner = OwnerRef{Kind: o.Kind, Name: o.Name}
+			}
+		}
 		if it.Metadata.DeletionTimestamp != nil {
 			p.Reason = "Terminating"
 		}

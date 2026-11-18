@@ -55,7 +55,17 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   `--cluster`, `--server`, `--user` and `HELM_KUBECONTEXT`. Each decision
   (confirmed, cancelled, refused, forced, unlocked) is logged in
   `~/.cache/rex8s/audit.log`. During an incident, `kunlock` stops the
-  questions for a while.
+  questions for a while. `guard: false` in the config turns it off entirely
+  (`rex8s setup` then removes the `kubectl`/`helm`/`flux` links; nothing asks
+  and nothing is logged); `rex8s setup` asks about it the first time at a
+  terminal.
+
+  The guard is a client-side safety net against slips, not a security
+  boundary: it only sees commands that go through it. A `kubectl` run by its
+  full path (`/opt/homebrew/bin/kubectl`), k9s, Lens, or any program built on
+  client-go changes production without asking. For a real barrier, use RBAC
+  on the server — a read-only context for daily work and a separate one with
+  write access — or admission policies.
 - **Expired logins** show up as "login expired" everywhere; picking such a
   cluster takes you straight to `kauth`.
 - **Tabs come back** after the Rex server restarts: the picker offers to
@@ -73,23 +83,67 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
 
 ## Browse
 
-**`kview [-A | --context CTX] [pods|workloads|services|jobs|nodes|warnings]`** —
+**`kview [-A [GROUP | CLUSTER,…] | --context CTX] [pods|workloads|services|jobs|nodes|warnings]`** —
 the cluster in one screen, like k9s: a tab per kind of object (**tab** or
 **1–6** switch), each list refreshing by itself, and the cursor staying on its
 row as it does. **`/`** filters (every word, any column; **esc** clears), **R**
-reloads, **q** quits. `-A` lists every cluster's, production in red.
+reloads, **?** lists every key, **q** quits. `-A` lists every cluster's,
+production in red; `-A prod` only a group of the config (`groups: {prod:
+[use, euw]}`), `-A use,euw` only the clusters named (`kview -A use euw nodes`
+works too).
 
 | Tab | Keys |
 |---|---|
-| pods | **l** logs · **s** shell · **d** describe · **e** events · **y** YAML · **w** why · **a** ask · **ctrl+d** delete |
+| pods | **enter** its owner · **l** logs · **p** previous logs · **s** shell · **d** describe · **e** events · **y** YAML · **w** why · **a** ask · **ctrl+d** delete |
 | workloads | **enter** its pods · **l** logs of all its pods · **r** restart · **d** describe · **y** YAML |
-| services | **enter** port-forward in the background (as `kpf`), and the browser opens for HTTP · **d** describe · **y** YAML |
+| services | **enter** port-forward in the background (as `kpf`), and the browser opens for HTTP · **o** its pods · **d** describe · **y** YAML |
 | jobs | **l** logs · **r** run a CronJob now / rerun a Job · **d** describe · **y** YAML |
-| nodes | **s** shell on the node · **d** describe · **y** YAML |
-| warnings | **enter** describe the object |
+| nodes | **enter** its pods · **s** shell on the node · **d** describe · **y** YAML |
+| warnings | **enter** go to the object · **d** describe it |
+| `:KIND` | **d** describe · **y** YAML · **ctrl+d** delete |
+
+**Any kind: `:`** opens a tab for another kind, like k9s: `:ingress`, `:cm`,
+`:secret`, `:pvc`, `:hpa`, `:crd`, or any resource name or short name, CRDs
+and their objects included. No need to remember short names: as you type, a
+list shows every kind whose name, short name or Kind contains it, by full name
+(`map` finds `configmaps (cm)`); **↑↓** choose, **tab** completes, **enter**
+opens the highlighted one (from `kubectl api-resources`).
+It shows the columns the API server prints for that kind (`kubectl get -o
+wide`: a CRD's printer columns too), with `-A` too, and the filter, marks and
+sorting work as on the other tabs; **esc** goes back to the fixed tabs. `:po`,
+`:deploy`, `:svc`, `:no`… go to their own tab.
+
+**Following links.** **enter** on a pod goes to its workload (through its
+ReplicaSet to the Deployment; or its StatefulSet, DaemonSet, Job), on a node
+to its pods, on a warning to the object's tab showing only that object, on a
+workload to its pods (by its selector, in its cluster and namespace); **o** on
+a service to the pods its selector picks (its endpoints). **esc** or
+**backspace** goes back where you came from, with the filter you had.
+
+**Marks.** **space** marks a row (●), **ctrl+a** marks every row shown (again:
+none), **esc** clears them. Delete (pods, `:KIND`) and restart (workloads) act
+on every marked row: one **y/N** lists them all, then the production guard's
+policy decides once for all of them — production asks you to type the
+clusters' names (`PRODUCTION (use, euw)`, with every object listed), an agent
+is refused, `kunlock` lets them through. Marks follow their rows across
+refreshes and go when the object does.
+
+**Containers and crashes.** On a pod with several containers, **l** asks
+which one (or all of them, prefixed), **s** and **p** which one (**↑↓** or
+**1–9**, **enter**). **p** shows the logs of the previous run of the
+container (`logs --previous`): why a pod in CrashLoopBackOff died.
+
+**Sorting and usage.** **shift+N** sorts by name, **A** age (youngest
+first), **S** status (failing first), **T** restarts, **C** CPU, **M** memory
+(the most first); the same key again reverses, and the header says the sort
+(`[sort: restarts ↓]`). Pods and nodes show CPU and memory from
+metrics-server (`kubectl top`), read at most every 30s per cluster; without
+metrics-server the columns show `-` (asked again after 5 minutes).
 
 Logs and shells open in Rex splits (outside Rex, in place); describe, events
-and YAML open in a viewer (**q** back), cleaned of escape sequences. Delete,
+and YAML open in a viewer (**q** back), cleaned of escape sequences. A second
+**l**, **s** or **w** replaces the split the first one opened instead of
+stacking another, and quitting kview closes the splits it opened. Delete,
 restart and run first ask **y/N** naming the object, its cluster and whether
 it is production (`delete pod default/web-7d9f on use (PROD)?`); they don't
 run while another action is still running. Then the command goes through the
@@ -97,12 +151,12 @@ production guard like any `kubectl`: on production (or with a verb it can't
 classify) it shows the command and asks for the cluster's name;
 `REX8S_FORCE=1` skips that.
 
-**enter** on a workload shows exactly its pods (by its selector, in its
-cluster and namespace; **esc** shows them all again). With `-A` each cluster
-appears as soon as it answers; a cluster that doesn't answer is a dim
-`skipped …` row at the bottom, with "since … next try …" while it is backed
-off, and **R** tries every cluster again. The pane label keeps the cluster
-and production: `kview PROD use/payments`, `kview PROD all`.
+With `-A` each cluster appears as soon as it answers; a cluster that doesn't
+answer is a dim `skipped …` row at the bottom, with "since … next try …"
+while it is backed off, and **R** tries every cluster again. In Rex the tab
+shows a short status (`kview: 3 failing`, `login expired: sa`), cleared when
+kview ends. The pane label keeps the cluster and production: `kview PROD
+use/payments`, `kview PROD all`, `kview PROD all:use,euw`.
 
 `rex8s browser CTX [NS]` is what the ⇧⌘K layout runs: kview, or k9s with
 `cluster_browser: k9s` (`rex8s k9s` still works, as an alias).
@@ -292,7 +346,7 @@ bindings, the palette and Raycast run:
 | `rex8s browser CTX [NS]` · `rex8s events CTX [NS]` | the left pane of the ⇧⌘K layout (above) · `kubectl get events -w` |
 | `rex8s label` · `rex8s restore` | refresh this pane's label · reopen the cluster tabs lost when the Rex server restarted |
 | `rex8s monitor` | the Flux monitor (palette) |
-| `rex8s guard TOOL ARGS…` | what the `kubectl`/`helm`/`flux` wrappers run: the production guard |
+| `rex8s guard TOOL ARGS…` | the production guard, like `rex8s-guard TOOL ARGS…` (the `kubectl`/`helm`/`flux` links run `rex8s-guard` under the tool's name) |
 | `rex8s list KIND …` · `rex8s freconcile CTX KIND NS NAME` | JSON and one-line answers for launchers ([Raycast](raycast.md)) |
 | `rex8s version` · `rex8s help` | the version · every subcommand |
 

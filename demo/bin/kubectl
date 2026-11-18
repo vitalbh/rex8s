@@ -291,8 +291,18 @@ def pod(ns, name, phase="Running", ready=(1, 1), restarts=0, waiting=None, age_h
         st["reason"] = reason
     # app: the owner's name (the Deployment/StatefulSet selector), as kview's "enter: pods" matches it
     app = re.sub(r"(-[a-z0-9]{8,10}-[a-z0-9]{5}|-[0-9]+|-[a-z0-9]{5})$", "", name)
-    return {"metadata": {"name": name, "namespace": ns, "creationTimestamp": created, "labels": {"app": app}},
-            "spec": {"containers": specs}, "status": st}
+    labels, owners = {"app": app}, []
+    m = re.match(r"^(.*)-([a-z0-9]{8,10})-[a-z0-9]{5}$", name)
+    if name.startswith("nightly-sync-"):  # a CronJob's Job
+        owners = [{"kind": "Job", "name": name.rsplit("-", 1)[0], "controller": True}]
+    elif m:  # a Deployment's ReplicaSet (kview: enter on a pod goes to its Deployment)
+        labels["pod-template-hash"] = m.group(2)
+        owners = [{"kind": "ReplicaSet", "name": m.group(1) + "-" + m.group(2), "controller": True}]
+    elif re.match(r"^.*-[0-9]+$", name):
+        owners = [{"kind": "StatefulSet", "name": name.rsplit("-", 1)[0], "controller": True}]
+    node = NODES[sum(map(ord, name)) % len(NODES)][0]  # kview: enter on a node lists these
+    return {"metadata": {"name": name, "namespace": ns, "creationTimestamp": created, "labels": labels, "ownerReferences": owners},
+            "spec": {"containers": specs, "nodeName": node}, "status": st}
 
 
 # failing pods per cluster (the menu bar demo): use has them all
@@ -336,7 +346,7 @@ def select(items, selector):
 
 def services(ns):
     def svc(n, name, ports, t="ClusterIP"):
-        return {"metadata": {"name": name, "namespace": n}, "spec": {"type": t, "ports": [
+        return {"metadata": {"name": name, "namespace": n}, "spec": {"type": t, "selector": {"app": name}, "ports": [
             {"name": pn, "port": pp, "protocol": "TCP"} for pn, pp in ports]}}
     all_svcs = [svc("api", "api", [("http", 8080), ("grpc", 9090)]), svc("api", "redis", [("redis", 6379)]),
                 svc("api", "orders-db", [("postgres", 5432)]),
@@ -413,6 +423,85 @@ CERTS = [
 
 
 NODES = [("node-a1", 0.62, 0.71), ("node-a2", 0.48, 0.83), ("node-b1", 0.35, 0.92)]
+
+
+# kview ":KIND" (kubectl get KIND -A -o wide): (namespace, cells…) per row
+GENERIC_ALIASES = {"ing": "ingresses", "ingress": "ingresses", "cm": "configmaps", "configmap": "configmaps",
+                   "secret": "secrets", "pvc": "persistentvolumeclaims", "persistentvolumeclaim": "persistentvolumeclaims",
+                   "hpa": "horizontalpodautoscalers", "horizontalpodautoscaler": "horizontalpodautoscalers",
+                   "crd": "customresourcedefinitions", "crds": "customresourcedefinitions",
+                   "customresourcedefinition": "customresourcedefinitions", "wd": "widgets", "widget": "widgets",
+                   "cert": "certificates", "certificate": "certificates"}
+GENERIC = {
+    "ingresses": (["NAME", "CLASS", "HOSTS", "ADDRESS", "PORTS", "AGE"], [
+        ["web", "web", "nginx", "www.example.com,example.com", "203.0.113.10", "80, 443", "200d"],
+        ["api", "api", "nginx", "api.example.com", "203.0.113.10", "80, 443", "180d"],
+        ["monitoring", "grafana", "nginx", "grafana.example.com", "203.0.113.10", "80, 443", "95d"]]),
+    "configmaps": (["NAME", "DATA", "AGE"], [
+        ["api", "api-config", "4", "40d"], ["api", "kube-root-ca.crt", "1", "300d"], ["web", "nginx-conf", "2", "80d"],
+        ["monitoring", "prometheus-rules", "12", "120d"], ["flux-system", "flux-config", "3", "300d"]]),
+    "secrets": (["NAME", "TYPE", "DATA", "AGE"], [
+        ["api", "api-db-credentials", "Opaque", "2", "200d"], ["api", "api-tls", "kubernetes.io/tls", "2", "20d"],
+        ["web", "web-tls", "kubernetes.io/tls", "2", "20d"], ["flux-system", "flux-system", "Opaque", "3", "300d"]]),
+    "persistentvolumeclaims": (["NAME", "STATUS", "VOLUME", "CAPACITY", "ACCESS MODES", "STORAGECLASS", "VOLUMEATTRIBUTESCLASS", "AGE", "VOLUMEMODE"], [
+        ["db", "data-postgres-0", "Bound", "pvc-8d2e7b10-postgres", "100Gi", "RWO", "gp3", "<unset>", "300d", "Filesystem"],
+        ["api", "redis-data", "Bound", "pvc-1a2b3c4d-redis", "20Gi", "RWO", "gp3", "<unset>", "200d", "Filesystem"],
+        ["monitoring", "prometheus-db", "Bound", "pvc-5e6f7a8b-prom", "200Gi", "RWO", "gp3", "<unset>", "120d", "Filesystem"],
+        ["search", "search-data", "Pending", "", "", "", "gp3", "<unset>", "2m", "Filesystem"]]),
+    "horizontalpodautoscalers": (["NAME", "REFERENCE", "TARGETS", "MINPODS", "MAXPODS", "REPLICAS", "AGE"], [
+        ["api", "api", "Deployment/api", "cpu: 36%/70%", "3", "10", "3", "90d"],
+        ["web", "web", "Deployment/web", "cpu: 81%/60%", "2", "4", "4", "60d"]]),
+    "customresourcedefinitions": (["NAME", "CREATED AT"], [
+        ["", "certificates.cert-manager.io", "2026-01-10T09:12:00Z"],
+        ["", "helmreleases.helm.toolkit.fluxcd.io", "2026-01-10T09:10:00Z"],
+        ["", "kustomizations.kustomize.toolkit.fluxcd.io", "2026-01-10T09:10:00Z"],
+        ["", "widgets.example.com", "2026-06-02T14:30:00Z"]]),
+    "certificates": (["NAME", "READY", "SECRET", "ISSUER", "STATUS", "AGE"], [
+        ["api", "api-tls", "True", "api-tls", "letsencrypt", "Certificate is up to date and has not expired", "20d"],
+        ["web", "web-tls", "False", "web-tls", "letsencrypt", "Issuing certificate as Secret does not exist", "3m"]]),
+    "widgets": (["NAME", "SIZE", "PHASE", "AGE"], [
+        ["api", "blue-widget", "small", "Ready", "12d"], ["web", "green-widget", "large", "Pending", "40m"]]),
+}
+GENERIC_YAML = """apiVersion: v1
+kind: {kind}
+metadata:
+  name: {name}
+  namespace: {ns}
+spec: {{}}"""
+API_RESOURCES = [
+    ["NAME", "SHORTNAMES", "APIVERSION", "NAMESPACED", "KIND"],
+    ["configmaps", "cm", "v1", "true", "ConfigMap"],
+    ["events", "ev", "v1", "true", "Event"],
+    ["namespaces", "ns", "v1", "false", "Namespace"],
+    ["nodes", "no", "v1", "false", "Node"],
+    ["persistentvolumeclaims", "pvc", "v1", "true", "PersistentVolumeClaim"],
+    ["persistentvolumes", "pv", "v1", "false", "PersistentVolume"],
+    ["pods", "po", "v1", "true", "Pod"],
+    ["secrets", "", "v1", "true", "Secret"],
+    ["services", "svc", "v1", "true", "Service"],
+    ["customresourcedefinitions", "crd,crds", "apiextensions.k8s.io/v1", "false", "CustomResourceDefinition"],
+    ["daemonsets", "ds", "apps/v1", "true", "DaemonSet"],
+    ["deployments", "deploy", "apps/v1", "true", "Deployment"],
+    ["replicasets", "rs", "apps/v1", "true", "ReplicaSet"],
+    ["statefulsets", "sts", "apps/v1", "true", "StatefulSet"],
+    ["horizontalpodautoscalers", "hpa", "autoscaling/v2", "true", "HorizontalPodAutoscaler"],
+    ["cronjobs", "cj", "batch/v1", "true", "CronJob"],
+    ["jobs", "", "batch/v1", "true", "Job"],
+    ["certificates", "cert,certs", "cert-manager.io/v1", "true", "Certificate"],
+    ["events", "ev", "events.k8s.io/v1", "true", "Event"],
+    ["helmreleases", "hr", "helm.toolkit.fluxcd.io/v2", "true", "HelmRelease"],
+    ["kustomizations", "ks", "kustomize.toolkit.fluxcd.io/v1", "true", "Kustomization"],
+    ["ingresses", "ing", "networking.k8s.io/v1", "true", "Ingress"],
+    ["widgets", "wd", "example.com/v1", "true", "Widget"],
+]
+
+
+def print_table(head, rows):
+    """Like kubectl's tabwriter: each column padded to its widest cell, 3 spaces apart."""
+    widths = [max([len(h)] + [len(r[i]) for r in rows]) for i, h in enumerate(head)]
+    for r in [head] + rows:
+        print("   ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+
 
 
 def nodes():
@@ -810,6 +899,22 @@ def main():
             return
         if res.startswith("/api"):
             die("Error from server (NotFound): the server could not find the requested resource")
+        kind = GENERIC_ALIASES.get(res.split(".")[0], res.split(".")[0])
+        if kind in GENERIC and len(pos) > 2 and out == "yaml":
+            print(GENERIC_YAML.format(kind=kind, name=pos[2], ns=ns or "default"))
+            return
+        if kind in GENERIC and out in ("", "wide"):
+            head, rows = GENERIC[kind]
+            rows = [r for r in rows if ns in (None, r[0])]
+            if kind == "customresourcedefinitions":
+                print_table(head, [r[1:] for r in rows])
+            elif not rows:
+                sys.stderr.write("No resources found\n")
+            elif ns is None:
+                print_table(["NAMESPACE"] + head, rows)
+            else:
+                print_table(head, [r[1:] for r in rows])
+            return
         if res.startswith("certificates"):
             CERTS[0]["status"]["notAfter"] = ts(-6 * 86400)
             CERTS[1]["status"]["notAfter"] = ts(-70 * 86400)
@@ -904,8 +1009,8 @@ def main():
             if p["status"]["phase"] != "Running":
                 continue
             cpu, mem = (r[3], r[4]) if r else ("3m", "24Mi")
-            c = p["spec"]["containers"][0]["name"]
-            cols = ([p["metadata"]["namespace"]] if ns is None else []) + [p["metadata"]["name"], c, cpu, mem]
+            c = [p["spec"]["containers"][0]["name"]] if "--containers" in flags else []
+            cols = ([p["metadata"]["namespace"]] if ns is None else []) + [p["metadata"]["name"]] + c + [cpu, mem]
             print("   ".join(cols))
     elif verb == "top" and len(pos) > 1 and pos[1] in ("nodes", "node", "no"):
         for name, cpu, mem in NODES:
@@ -913,7 +1018,9 @@ def main():
     elif verb == "create" and len(pos) > 2 and pos[1] == "job":
         print("job.batch/%s created" % pos[2])
     elif verb == "delete" and len(pos) > 2:
-        print('%s.batch "%s" deleted' % (pos[1], pos[2]))
+        print('%s "%s" deleted' % (pos[1].split(".")[0].rstrip("s"), pos[2]))
+    elif verb == "api-resources":
+        print_table(API_RESOURCES[0], API_RESOURCES[1:])
     elif verb == "logs":
         logs(pos, flags, ctx)
     elif verb == "annotate":

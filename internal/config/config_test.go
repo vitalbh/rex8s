@@ -43,3 +43,22 @@ func TestKubeconfigPathList(t *testing.T) {
 		t.Errorf("KubeconfigPath() = %q, want %q", got, want)
 	}
 }
+
+func TestGuardAndWrappers(t *testing.T) {
+	var none *Config
+	if !(&Config{}).GuardOn() || !(&Config{}).WrappersOn() || !none.GuardOn() || !none.WrappersOn() {
+		t.Fatal("guard and wrappers are on by default")
+	}
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte("guard: false\nwrappers: false\nskip_wrappers: [kns, kctx]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REX8S_CONFIG", p)
+	c, err := Load()
+	if err != nil || len(c.Warnings) != 0 {
+		t.Fatalf("%v %q", err, c.Warnings)
+	}
+	if c.GuardOn() || c.WrappersOn() || !c.SkipWrapper("kns") || !c.SkipWrapper("kctx") || c.SkipWrapper("kview") {
+		t.Errorf("read %+v", c)
+	}
+}

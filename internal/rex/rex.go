@@ -30,6 +30,12 @@ func Bin() string {
 	return "rex"
 }
 
+// Installed: the Rex CLI is on PATH or in the app bundle.
+func Installed() bool {
+	_, err := exec.LookPath(Bin())
+	return err == nil
+}
+
 // Block is the current pane (REX_BLOCK), or "" outside Rex.
 func Block() string { return os.Getenv("REX_BLOCK") }
 

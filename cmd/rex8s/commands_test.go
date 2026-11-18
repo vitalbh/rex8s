@@ -71,8 +71,8 @@ func TestWrappersComeFromTheTable(t *testing.T) {
 		if c == nil || c.name != sub {
 			t.Errorf("wrapper %s → %s: not the table's command", w, sub)
 		}
-		if s := wrapperScript(w); !strings.Contains(s, `rex8s" `+sub+` "$@"`) {
-			t.Errorf("wrapper %s script runs something else:\n%s", w, s)
+		if got := commandArgs([]string{"/x/bin/" + w, "a"}); !slices.Equal(got, []string{sub, "a"}) {
+			t.Errorf("run as %s: %q, want %s a", w, got, sub)
 		}
 	}
 }

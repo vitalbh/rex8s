@@ -82,6 +82,16 @@ type Config struct {
 	// (default: services of the stream's namespace and its pods), "all"
 	// (services of any namespace too) or "off".
 	LogLinks string `json:"log_links"`
+	// Guard: the production guard (kubectl/helm/flux ask before changing a
+	// production cluster; kroll, krun, kview… too). Default true; false
+	// turns it off entirely. rex8s setup asks the first time at a terminal.
+	Guard *bool `json:"guard"`
+	// Wrappers: rex8s setup installs the k* commands (kview, klogs…).
+	// Default true; false installs none (rex8s kview still works).
+	Wrappers *bool `json:"wrappers"`
+	// SkipWrappers: k* commands setup leaves out, e.g. [kns, kctx] when
+	// kubectx or an alias already has those names.
+	SkipWrappers []string `json:"skip_wrappers"`
 
 	// Warnings: what Load found wrong but could live with (unknown keys,
 	// invalid values that fall back to the default). For the user to see.
@@ -260,6 +270,26 @@ func (c *Config) LogLinksMode() string {
 		return "off"
 	}
 	return "namespace"
+}
+
+// GuardOn reports whether the production guard is on (the default; a nil
+// config too).
+func (c *Config) GuardOn() bool { return c == nil || c.Guard == nil || *c.Guard }
+
+// WrappersOn reports whether setup installs the k* commands (the default).
+func (c *Config) WrappersOn() bool { return c == nil || c.Wrappers == nil || *c.Wrappers }
+
+// SkipWrapper reports whether skip_wrappers names the k* command name.
+func (c *Config) SkipWrapper(name string) bool {
+	if c == nil {
+		return false
+	}
+	for _, s := range c.SkipWrappers {
+		if strings.TrimSpace(s) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // NotificationsOn reports whether macOS notifications are enabled.

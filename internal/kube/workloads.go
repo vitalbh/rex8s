@@ -113,12 +113,7 @@ func ParseWorkloads(data []byte) ([]Workload, error) {
 			KsName:      it.Metadata.Labels["kustomize.toolkit.fluxcd.io/name"],
 			KsNamespace: it.Metadata.Labels["kustomize.toolkit.fluxcd.io/namespace"],
 		}
-		var sel []string
-		for k, v := range it.Spec.Selector.MatchLabels {
-			sel = append(sel, k+"="+v)
-		}
-		sort.Strings(sel)
-		w.Selector = strings.Join(sel, ",")
+		w.Selector = selectorString(it.Spec.Selector.MatchLabels)
 		for _, c := range it.Spec.Template.Spec.Containers {
 			w.Containers = append(w.Containers, Container{c.Name, c.Image})
 		}
@@ -171,4 +166,15 @@ func ShortKind(kind string) string {
 		return "hr"
 	}
 	return strings.ToLower(kind)
+}
+
+// selectorString is a label selector map as "k=v,k=v", sorted ("" when
+// empty).
+func selectorString(m map[string]string) string {
+	sel := make([]string, 0, len(m))
+	for k, v := range m {
+		sel = append(sel, k+"="+v)
+	}
+	sort.Strings(sel)
+	return strings.Join(sel, ",")
 }

@@ -20,6 +20,7 @@ type Service struct {
 	Name      string
 	Type      string
 	Ports     []ServicePort
+	Selector  string // spec.selector as "k=v,k=v", sorted; "" when it has none
 }
 
 // ParseServices parses `kubectl get services -o json`, keeping only TCP
@@ -32,8 +33,9 @@ func ParseServices(data []byte) ([]Service, error) {
 				Namespace string `json:"namespace"`
 			} `json:"metadata"`
 			Spec struct {
-				Type  string `json:"type"`
-				Ports []struct {
+				Type     string            `json:"type"`
+				Selector map[string]string `json:"selector"`
+				Ports    []struct {
 					Name        string `json:"name"`
 					Port        int    `json:"port"`
 					Protocol    string `json:"protocol"`
@@ -47,7 +49,7 @@ func ParseServices(data []byte) ([]Service, error) {
 	}
 	out := make([]Service, 0, len(list.Items))
 	for _, it := range list.Items {
-		s := Service{Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Type: it.Spec.Type}
+		s := Service{Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Type: it.Spec.Type, Selector: selectorString(it.Spec.Selector)}
 		for _, p := range it.Spec.Ports {
 			if p.Protocol == "" || p.Protocol == "TCP" { // port-forward is TCP only
 				s.Ports = append(s.Ports, ServicePort{Name: p.Name, Port: p.Port, Protocol: "TCP", AppProtocol: p.AppProtocol})

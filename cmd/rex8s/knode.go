@@ -110,7 +110,7 @@ func (a *app) nodetail(ctxName, nodeName string) error {
 	}
 	rex.Rename("node " + c.Short + "/" + nodeName)
 	a.tint(c)
-	if ok, err := confirmChange([]kube.Context{c}, "knode: kubectl debug node/"+nodeName, "privileged pod on the node, with its filesystem at /host"); !ok {
+	if ok, err := a.confirmChange([]kube.Context{c}, "knode: kubectl debug node/"+nodeName, "privileged pod on the node, with its filesystem at /host"); !ok {
 		return err
 	}
 	cl, err := a.client(a.src)

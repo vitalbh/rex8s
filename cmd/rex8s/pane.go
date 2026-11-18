@@ -165,8 +165,11 @@ func (a *app) pane(ctxName, ns string, layout bool) error {
 	rex.Rename(labelText(c, ns))
 	rex.RenameWindow(labelText(c, ns))
 	a.tint(c)
-	if c.Prod {
+	switch {
+	case c.Prod && a.cfg.GuardOn():
 		fmt.Println(tui.Prod.Render(" PRODUCTION: "+c.Short+" ") + "  mutating commands ask for confirmation (Flux reverts manual changes)")
+	case c.Prod:
+		fmt.Println(tui.Prod.Render(" PRODUCTION: "+c.Short+" ") + "  guard off: changes run without asking (Flux reverts manual changes)")
 	}
 	fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render(ctxName) +
 		tui.Dim.Render("  ·  kns = switch namespace · kctx = switch cluster in this pane"))

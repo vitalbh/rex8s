@@ -25,6 +25,9 @@ var configKeys = map[string]string{
 	"log_links":        "cluster URLs in logs that become clickable: namespace (default: the stream's), all, or off",
 	"login_url":        "page kauth opens when a login expired",
 	"notifications":    "true or false: macOS notifications",
+	"guard":            "true (default) or false: the production guard (kubectl/helm/flux, kview, kroll… ask before changing production); rex8s setup applies it",
+	"wrappers":         "true (default) or false: rex8s setup installs the k* commands (rex8s kview… works either way)",
+	"skip_wrappers":    "list: k* commands setup leaves out, e.g. kns, kctx (config add/remove; rex8s setup applies it)",
 	"ai_command":       "CLI for kwhy (claude by default), or off",
 	"ai_language":      "language kwhy and kask answer in, e.g. pt-BR",
 	"ask_agent":        "agent kask opens: claude (default) or codex",
@@ -34,7 +37,7 @@ var configKeys = map[string]string{
 	"hide":             "list: contexts hidden from the picker (config add/remove)",
 }
 
-var listKeys = map[string]bool{"gitops_repos": true, "hide": true}
+var listKeys = map[string]bool{"gitops_repos": true, "hide": true, "skip_wrappers": true}
 
 // rex8s config [get KEY | set KEY VALUE | unset KEY | add KEY VALUE | remove KEY VALUE]
 // No arguments: every setting with its current value.
@@ -42,6 +45,17 @@ func (a *app) configCmd(args []string) error {
 	if len(args) == 0 {
 		return a.configList()
 	}
+	err := a.configChange(args)
+	if err == nil && len(args) > 1 && args[0] != "get" && setupKeys[args[1]] {
+		fmt.Println(tui.Dim.Render("rex8s setup applies it to the installed commands"))
+	}
+	return err
+}
+
+// setupKeys: settings rex8s setup applies (the links it installs).
+var setupKeys = map[string]bool{"guard": true, "wrappers": true, "skip_wrappers": true}
+
+func (a *app) configChange(args []string) error {
 	need := func(n int) error {
 		if len(args) < n {
 			return fmt.Errorf("usage: rex8s config %s KEY%s", args[0], map[bool]string{true: " VALUE", false: ""}[n > 2])
@@ -66,9 +80,9 @@ func (a *app) configCmd(args []string) error {
 		if listKeys[key] {
 			return fmt.Errorf("%s is a list: rex8s config add %s VALUE", key, key)
 		}
-		if key == "notifications" {
+		if key == "notifications" || key == "guard" || key == "wrappers" {
 			if _, err := strconv.ParseBool(val); err != nil {
-				return fmt.Errorf("notifications: true or false")
+				return fmt.Errorf("%s: true or false", key)
 			}
 			return a.editConfig(func(doc string) string { return yamledit.SetKey(doc, key, val) })
 		}

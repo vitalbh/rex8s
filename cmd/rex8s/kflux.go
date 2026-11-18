@@ -79,7 +79,7 @@ func (a *app) kflux() error {
 
 	switch act.Key {
 	case "reconcile":
-		if ok, err := confirmChange([]kube.Context{c}, fmt.Sprintf("kflux: reconcile %s %s/%s", f.Kind, f.Namespace, f.Name)); !ok {
+		if ok, err := a.confirmChange([]kube.Context{c}, fmt.Sprintf("kflux: reconcile %s %s/%s", f.Kind, f.Namespace, f.Name)); !ok {
 			return err
 		}
 		return reconcile(cl, c, f)
@@ -259,10 +259,13 @@ func reconcile(cl kube.Client, c kube.Context, f kube.FluxItem) error {
 }
 
 // runKubectl runs kubectl attached to the terminal. guarded=true goes through
-// the production guard wrapper.
+// the production guard (rex8s-guard kubectl ARGS).
 func (a *app) runKubectl(guarded bool, args ...string) error {
-	bin := filepath.Join(a.binDir, "kubectl")
-	if !guarded {
+	var bin string
+	if guarded {
+		bin = filepath.Join(a.binDir, "rex8s-guard")
+		args = append([]string{"kubectl"}, args...)
+	} else {
 		var err error
 		if bin, err = a.kubectl(); err != nil {
 			return err

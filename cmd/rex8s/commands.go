@@ -220,8 +220,12 @@ func commandTable() []command {
 			}},
 
 		// ── pods ────────────────────────────────────────────────────────
-		{name: "kview", wrapper: "kview", args: "[-A | --context CTX] [pods|workloads|services|jobs|nodes|warnings]", short: "browse the cluster like k9s: tabs, live lists, keys",
-			group: "pods", details: []string{"tab or 1-6 switch, / filters, letters act: l logs, s shell, d describe, y yaml, r restart…", "-A: every cluster, each as it answers; R retries skipped ones. Changes ask y/N naming the object; production asks again."},
+		{name: "kview", wrapper: "kview", args: "[-A [GROUP|CLUSTER,…] | --context CTX] [pods|workloads|services|jobs|nodes|warnings]", short: "browse the cluster like k9s: tabs, live lists, keys",
+			group: "pods", details: []string{
+				"tab or 1-6 switch, / filters, ? keys, letters act: l logs, p previous logs, s shell, d describe, y yaml, r restart…",
+				":KIND opens any kind (:ingress, :cm, :crd…, tab completes); enter follows links (pod → workload, node → pods, warning → object), esc/⌫ back.",
+				"space marks (ctrl+a all): delete/restart act on every marked row, one confirmation. Shift+N/A/S/T/C/M sort; CPU/MEM from metrics-server.",
+				"-A: every cluster (or a group, or use,euw), each as it answers; R retries skipped ones. Changes ask y/N naming the object; production asks again."},
 			run: func(a *app, args []string) error { return a.kview(args) }},
 		{name: "kpods", wrapper: "kpods", args: "[failing] [FILTER]", short: "the pods of every cluster in one picker",
 			group: "pods", details: []string{"Per cluster the ones that need attention first. failing: only those (kfail on every cluster).", "Preview: events and last logs. Enter: logs, why, ask, shell, describe, events."},

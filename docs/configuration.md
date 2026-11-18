@@ -29,6 +29,9 @@ notifications: true                        # macOS notifications (fwatch, monito
 ai_command: claude                         # CLI used by kwhy
 ai_language: en                            # language kwhy and kask answer in
 ask_agent: claude                          # kask opens claude or codex
+guard: true                                # the production guard; false turns it off (rex8s setup applies it)
+wrappers: true                             # rex8s setup installs the k* commands; false: none (rex8s kview still works)
+skip_wrappers: [ kns, kctx ]               # k* commands setup leaves out (kubectx, your aliases)
 node_debug_image: busybox:1.36             # image knode runs on the node
 net_debug_image: nicolaka/netshoot:v0.13   # image knet runs in the namespace
 gitops_repos: [ ~/dev/gitops ]             # local clones of the Flux repos, for kgit
@@ -41,6 +44,14 @@ forwards:                                  # favorite port-forwards: kpf NAME, R
 Without a config file nothing is treated as production and short names come
 from the context name.
 
+`guard`, `wrappers` and `skip_wrappers` decide what `rex8s setup` links in
+`~/.config/rex/rex8s/bin`; run it again after changing them. With
+`guard: false` the `kubectl`/`helm`/`flux` links go away, `rex8s-guard` run
+anyway passes the command straight through, the rex8s commands that change a
+cluster (`kview`'s delete and restart, `kroll`, `krun`…) don't ask, and
+nothing goes to the audit log. `rex8s setup` asks about `guard` once, at a
+terminal, when it isn't set ([What setup does](install.md#what-setup-does)).
+
 ## In any shell
 
 The `k*` commands live in `~/.config/rex/rex8s/bin`, which rex8s panes put on
@@ -52,7 +63,8 @@ echo 'export PATH="$HOME/.config/rex/rex8s/bin:$PATH"' >> ~/.zshrc   # bash: ~/.
 
 Outside a rex8s pane they use the machine's default context (`kubectl config
 use-context`, `rex8s use-context`, or the Raycast Kube Context menu), and the
-`kubectl`/`helm`/`flux` wrappers bring the production confirmation along.
+`kubectl`/`helm`/`flux` links to `rex8s-guard` bring the production
+confirmation along (unless `guard: false`).
 Outside Rex, commands that open a split run in the terminal itself.
 
 To see the cluster in the prompt (instant: it reads the kubeconfig, never the

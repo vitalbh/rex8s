@@ -61,7 +61,12 @@ func (a *app) khelp(args []string) error {
 		return nil
 	}
 	argv := strings.Fields(e.cmd)
+	// a k* command is rex8s run under that name (it dispatches on argv[0]),
+	// so it works without the k* links too (wrappers: false)
 	bin := filepath.Join(a.binDir, argv[0])
+	if _, ok := wrapperOf[argv[0]]; ok {
+		bin = filepath.Join(a.binDir, "rex8s")
+	}
 	if _, err := os.Stat(bin); err != nil {
 		return fmt.Errorf("%s not installed (make install)", argv[0])
 	}

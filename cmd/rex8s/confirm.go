@@ -11,8 +11,8 @@ import (
 // change a rex8s command makes itself. ok=false with a nil error: the user
 // said no ("cancelled." is already printed); with an error: refused (no
 // terminal, or an agent), and the error says how to go on.
-func confirmChange(clusters []kube.Context, what string, notes ...string) (ok bool, err error) {
-	err = guard.ConfirmChange(clusters, what, notes...)
+func (a *app) confirmChange(clusters []kube.Context, what string, notes ...string) (ok bool, err error) {
+	err = guard.ConfirmChange(a.cfg, clusters, what, notes...)
 	if errors.Is(err, guard.ErrCancelled) {
 		return false, nil
 	}

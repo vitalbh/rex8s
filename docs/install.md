@@ -44,12 +44,34 @@ make install        # builds, then rex8s setup (make check runs the tests)
 ## What setup does
 
 `rex8s setup` does everything, and can be run again any time (after an
-upgrade, say): it puts `rex8s` and `rex8s-guard` in `~/.config/rex/rex8s/bin`
-with the `k*` commands and the `kubectl`/`helm`/`flux` guard, writes
+upgrade, or a config change): it puts `rex8s` and `rex8s-guard` in
+`~/.config/rex/rex8s/bin` (links to Homebrew's `opt` path when installed with
+brew, so upgrades apply), links the `k*` commands to `rex8s` (`kview ->
+rex8s`) and `kubectl`/`helm`/`flux` to `rex8s-guard`, writes
 `~/.config/rex/rex8s.lua`, adds `require("rex8s")` to Rex's `init.lua` and
-reloads Rex's config.
+reloads Rex's config. Without Rex installed it stops after the commands (it
+doesn't create a Rex config); run it again once Rex is there.
 
-- **`rex8s doctor`** checks the installation and what rex8s uses: the commands,
+- **The production guard question.** The first time, at a terminal, setup
+  asks *Install the production guard? kubectl/helm/flux ask before changing
+  production clusters (recommended)* — Yes by default — and saves the answer
+  as `guard:` in `config.yaml`, so it never asks again. Without a terminal
+  (`brew` post-install, a script, `curl` on a server) it installs the guard
+  and asks nothing.
+- **`guard: false`** turns the guard off entirely: setup leaves out (and
+  removes) the `kubectl`/`helm`/`flux` links, and `kview`, `kroll`, `krun`…
+  change production without asking.
+- **`wrappers: false`** installs no `k*` commands (`rex8s kview`, `rex8s logs`
+  … still work); **`skip_wrappers: [kns, kctx]`** leaves out just those
+  names, when kubectx or an alias of yours already uses them.
+
+Change any of them (`rex8s config set guard false`, `rex8s config add
+skip_wrappers kns`) and run `rex8s setup` again to apply it. The `k*`
+commands were small `sh` scripts before: setup replaces them with the links.
+
+- **`rex8s doctor`** checks the installation and what rex8s uses: the commands
+  (against `guard`, `wrappers` and `skip_wrappers`; it says `guard: off` when
+  it is),
   the Lua file (and whether it matches this version), Rex, kubectl, flux, k9s,
   claude, the config, the kubeconfig, `gitops_repos`, favorite forwards.
 - **`rex8s uninstall`** undoes `setup`; your `config.yaml` stays.

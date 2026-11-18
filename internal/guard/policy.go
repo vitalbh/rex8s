@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/vitalbh/rex8s/internal/config"
 	"github.com/vitalbh/rex8s/internal/kube"
 )
 
@@ -25,6 +26,9 @@ import (
 //     kask sets REX8S_AGENT; Codex, Cursor and scripts have no TTY). Refused
 //     with a message saying how to proceed.
 //  4. Otherwise the user types the production cluster name(s).
+//
+// guard: false in the config turns all of it off: Run and ConfirmChange
+// check it (the config is passed in), and nothing is logged.
 //
 // Every decision is written to the audit log (see audit.go).
 
@@ -100,10 +104,11 @@ func decide(prod []string, what string, maybe bool, notes ...string) error {
 // returns nil at once. Otherwise REX8S_FORCE lets it through, an agent or a
 // missing terminal gets ErrRefused (its message says how to go on), and the
 // user types the production cluster names (ErrCancelled on anything else,
-// after printing "cancelled.").
-func ConfirmChange(clusters []kube.Context, what string, notes ...string) error {
+// after printing "cancelled."). With guard: false in cfg (the config the
+// command loaded) it returns nil, as Run lets the tool through.
+func ConfirmChange(cfg *config.Config, clusters []kube.Context, what string, notes ...string) error {
 	prod := ProdShorts(clusters)
-	if len(prod) == 0 {
+	if len(prod) == 0 || !cfg.GuardOn() {
 		return nil
 	}
 	return decide(prod, what, false, notes...)

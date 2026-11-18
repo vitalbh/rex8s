@@ -20,7 +20,8 @@ var errExit = errors.New("exit 1")
 // Run executes tool (kubectl/helm/flux) under the production policy (see
 // policy.go): a command that changes a production cluster, or one the guard
 // can't classify, asks first; without a terminal it is refused; REX8S_FORCE=1
-// lets it through.
+// lets it through. With guard: false in the config it runs the tool and
+// nothing else: no question, no audit line.
 //
 // It lives outside the TUI binary on purpose: Bubble Tea's init() queries the
 // terminal background color and can block for up to 5s on terminals that
@@ -29,6 +30,9 @@ func Run(tool string, args []string, skipDir string, cfg *config.Config) error {
 	bin := pathx.Real(tool, skipDir)
 	if bin == "" {
 		return fmt.Errorf("%s not found in PATH", tool)
+	}
+	if !cfg.GuardOn() {
+		return sys.exec(bin, append([]string{tool}, args...))
 	}
 	err := run(tool, bin, args, cfg)
 	switch {
