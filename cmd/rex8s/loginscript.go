@@ -25,8 +25,9 @@ import (
 //	kubectl config use-context me-prod
 //
 // Instead of running it through a shell, kauth understands exactly these
-// forms — mkdir and file writes under ~/.kube, and `kubectl config` — and
-// refuses anything else.
+// forms — mkdir and file writes under ~/.kube, and `kubectl config`
+// set-cluster/set-credentials/set-context/use-context without --exec-* or
+// --kubeconfig — and refuses anything else.
 
 type stepKind int
 
@@ -185,6 +186,9 @@ func parseScript(text, home string) ([]step, error) {
 						steps = append(steps, step{kind: stepMkdir, path: p})
 					}
 				case len(argv) >= 3 && argv[0] == "kubectl" && argv[1] == "config":
+					if err := checkConfigArgs(argv); err != nil {
+						return nil, err
+					}
 					for j := range argv {
 						argv[j] = expand(argv[j])
 						if k, v, ok := strings.Cut(argv[j], "="); ok && strings.HasPrefix(k, "--") {
@@ -206,4 +210,24 @@ func parseScript(text, home string) ([]step, error) {
 		return nil, errors.New("nothing pasted")
 	}
 	return steps, nil
+}
+
+// the `kubectl config` subcommands a login page prints
+var loginConfigCmds = map[string]bool{"set-cluster": true, "set-credentials": true, "set-context": true, "use-context": true}
+
+// checkConfigArgs refuses a `kubectl config` line that does more than add a
+// cluster, credentials or context: another subcommand (view --raw, unset,
+// delete-*…), --exec-* (credentials that run a program on every kubectl) or
+// --kubeconfig (another file).
+func checkConfigArgs(argv []string) error {
+	if !loginConfigCmds[argv[2]] {
+		return fmt.Errorf("refusing `kubectl config %s`: only set-cluster, set-credentials, set-context and use-context are accepted", truncate(argv[2], 30))
+	}
+	for _, a := range argv[3:] {
+		name, _, _ := strings.Cut(a, "=")
+		if strings.HasPrefix(name, "--exec") || name == "--kubeconfig" {
+			return fmt.Errorf("refusing %s in `kubectl config %s`: a login script has no reason to set it", name, argv[2])
+		}
+	}
+	return nil
 }

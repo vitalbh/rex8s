@@ -14,7 +14,7 @@
       "name": "open-cluster",
       "title": "Open Cluster",
       "subtitle": "rex8s",
-      "description": "Open a cluster shell or k9s layout in Rex.",
+      "description": "Open a cluster shell or the kview layout in Rex.",
       "mode": "view"
     },
     {

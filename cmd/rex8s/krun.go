@@ -2,18 +2,16 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
@@ -32,18 +30,19 @@ func (a *app) krun(args []string) error {
 	if err != nil {
 		return err
 	}
-	k, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
+	cl.Timeout = 30 * time.Second
 	raw, err := kube.Load(a.src)
 	if err != nil {
 		return err
 	}
-	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 
 	var skipped []string
-	targets, _, err := a.pickTargets(k, clusters, filter, "Run in which workloads?", &skipped)
+	targets, _, err := a.pickTargets(cl, clusters, filter, "Run in which workloads?", &skipped)
 	for _, s := range skipped {
 		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
 	}
@@ -64,7 +63,7 @@ func (a *app) krun(args []string) error {
 	var pods []podRef
 	perTarget := map[string]int{}
 	for _, t := range targets {
-		names, err := runningPods(k, a.src, t.c.Name, t.Namespace, t.Selector)
+		names, err := cl.RunningPods(t.c.Name, t.Namespace, t.Selector)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, tui.Err.Render(fmt.Sprintf("  %s %s/%s: %v", t.c.Short, t.Namespace, t.Name, err)))
 			continue
@@ -81,23 +80,17 @@ func (a *app) krun(args []string) error {
 	// the plan, then confirmation for production
 	cmdText := strings.Join(command, " ")
 	fmt.Println(tui.Bold.Render(cmdText))
-	var prod []string
-	seenProd := map[string]bool{}
+	touched := make([]kube.Context, 0, len(targets))
 	for _, t := range targets {
 		tag := ""
 		if t.c.Prod {
 			tag = " " + tui.Prod.Render(" PROD ")
-			if !seenProd[t.c.Short] {
-				seenProd[t.c.Short] = true
-				prod = append(prod, t.c.Short)
-			}
 		}
+		touched = append(touched, t.c)
 		fmt.Printf("  %-10s %s %s/%s · %d pod(s)%s\n", t.c.Short, kube.ShortKind(t.Kind), t.Namespace, t.Name, perTarget[t.key()], tag)
 	}
-	sort.Strings(prod)
-	if len(prod) > 0 && os.Getenv("REX8S_FORCE") == "" && !confirmRun(cmdText, len(pods), prod) {
-		fmt.Fprintln(os.Stderr, "cancelled.")
-		return nil
+	if ok, err := confirmChange(touched, fmt.Sprintf("krun: run %q in %d pod(s)", cmdText, len(pods))); !ok {
+		return err
 	}
 
 	// run, at most 8 at a time; print in plan order
@@ -116,7 +109,9 @@ func (a *app) krun(args []string) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			start := time.Now()
-			out, err := execInPod(k, a.src, p.t.c.Name, p.t.Namespace, p.pod, container, command)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			out, err := cl.Exec(ctx, p.t.c.Name, p.t.Namespace, p.pod, container, command)
 			results[i] = result{out, err, time.Since(start)}
 		}()
 	}
@@ -173,45 +168,6 @@ func parseKrunArgs(args []string) (filter, container string, command []string, e
 	return filter, container, command, nil
 }
 
-// confirmRun: a y/N question, for runs that touch production (the plan with
-// every workload and pod count is printed right above it).
-func confirmRun(cmdText string, pods int, prod []string) bool {
-	return confirmProd(fmt.Sprintf("Run %q in %d pod(s) on", cmdText, pods), prod)
-}
-
-// confirmProd asks "<question> <prod clusters>? [y/N]" on the terminal.
-func confirmProd(question string, prod []string) bool {
-	fmt.Fprintf(os.Stderr, "\n%s %s %s %s",
-		tui.Prod.Render(" PROD "), question,
-		tui.Bold.Render(strings.Join(prod, ", "))+"?",
-		tui.Dim.Render("[y/N] "))
-	tty, err := os.Open("/dev/tty")
-	if err != nil {
-		return false
-	}
-	defer tty.Close()
-	ans, _ := bufio.NewReader(tty).ReadString('\n')
-	switch strings.ToLower(strings.TrimSpace(ans)) {
-	case "y", "yes", "s", "sim":
-		return true
-	}
-	return false
-}
-
-// prodClusters: the production clusters among the targets, sorted.
-func prodClusters(ts []target) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, t := range ts {
-		if t.c.Prod && !seen[t.c.Short] {
-			seen[t.c.Short] = true
-			out = append(out, t.c.Short)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // askCommand prompts for the command after the pick ("" cancels).
 func askCommand(targets []target) []string {
 	fmt.Fprintf(os.Stderr, "%s %s\n", tui.Bold.Render("Command to run in"), describeTargets(targets))
@@ -241,79 +197,49 @@ func describeTargets(ts []target) string {
 	return fmt.Sprintf("%d workloads on %s", len(ts), strings.Join(cs, ", "))
 }
 
-// uniqueClusters drops aliases: contexts pointing at the same server.
-func uniqueClusters(cs []kube.Context) []kube.Context {
-	seen := map[string]bool{}
-	var out []kube.Context
-	for _, c := range cs {
-		key := c.Server
-		if key == "" {
-			key = c.Name
-		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, c)
-	}
-	return out
-}
-
 // target is one workload on one cluster.
 type target struct {
-	c                     kube.Context
-	Kind, Namespace, Name string
-	Selector              string
-	Containers            []containerImage
+	c kube.Context
+	kube.Workload
 }
 
-type containerImage struct{ Name, Image string }
+// workloadTargets parses `kubectl get deployments,statefulsets,daemonsets -o json`
+// into targets without a cluster.
+func workloadTargets(data []byte) ([]target, error) {
+	ws, err := kube.ParseWorkloads(data)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]target, len(ws))
+	for i, w := range ws {
+		out[i] = target{Workload: w}
+	}
+	return out, nil
+}
 
 func (t target) key() string { return t.c.Name + "|" + t.Kind + "/" + t.Namespace + "/" + t.Name }
 
 // findWorkloads lists, on every cluster, the workloads whose name contains
 // filter. Names and namespaces may differ between clusters, so each cluster's
 // match is its own target; the user marks which ones to run in.
-func (a *app) findWorkloads(k string, clusters []kube.Context, filter string) ([]target, []string) {
-	type res struct {
-		c   kube.Context
-		ws  []target
-		err error
-	}
-	results := make([]res, len(clusters))
-	var wg sync.WaitGroup
-	for i, c := range clusters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			out, err := kubectlOut(k, a.src, 30*time.Second, "--context", c.Name, "get", "deployments,statefulsets,daemonsets", "-A", "-o", "json")
-			if err != nil {
-				results[i] = res{c: c, err: err}
-				return
+func (a *app) findWorkloads(cl kube.Client, clusters []kube.Context, filter string) ([]target, []string) {
+	res := fleet.Read(a.readerFor(cl), clusters, [][]string{{"get", "deployments,statefulsets,daemonsets", "-A", "-o", "json"}},
+		func(c kube.Context, out [][]byte) ([]target, error) {
+			ts, err := workloadTargets(out[0])
+			for i := range ts {
+				ts[i].c = c
 			}
-			ws, err := parseWorkloadSelectors([]byte(out))
-			results[i] = res{c: c, ws: ws, err: err}
-		}()
-	}
-	wg.Wait()
-
+			return ts, err
+		})
 	var found []target
 	var skipped []string
+	for _, s := range res.Skipped {
+		skipped = append(skipped, s.Cluster.Short+": skipped, "+s.Reason)
+	}
 	f := strings.ToLower(filter)
-	for _, r := range results {
-		if r.err != nil {
-			why := lastLogLine(r.err.Error())
-			if kube.AuthExpired(r.err) {
-				why = "login expired (kauth " + r.c.Short + ")"
-			}
-			skipped = append(skipped, r.c.Short+": skipped, "+why)
-			continue
-		}
-		for _, w := range r.ws {
-			if f == "" || strings.Contains(strings.ToLower(w.Name), f) {
-				w.c = r.c
-				found = append(found, w)
-			}
+	for _, r := range res.Rows {
+		if f == "" || strings.Contains(strings.ToLower(r.V.Name), f) {
+			found = append(found, r.V)
 		}
 	}
 	// exact name first, then by name and cluster, so the same workload on
@@ -331,59 +257,17 @@ func (a *app) findWorkloads(k string, clusters []kube.Context, filter string) ([
 	return found, skipped
 }
 
-func parseWorkloadSelectors(data []byte) ([]target, error) {
-	var list struct {
-		Items []struct {
-			Kind     string `json:"kind"`
-			Metadata struct {
-				Name      string `json:"name"`
-				Namespace string `json:"namespace"`
-			} `json:"metadata"`
-			Spec struct {
-				Selector struct {
-					MatchLabels map[string]string `json:"matchLabels"`
-				} `json:"selector"`
-				Template struct {
-					Spec struct {
-						Containers []struct {
-							Name  string `json:"name"`
-							Image string `json:"image"`
-						} `json:"containers"`
-					} `json:"spec"`
-				} `json:"template"`
-			} `json:"spec"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(data, &list); err != nil {
-		return nil, err
-	}
-	out := make([]target, 0, len(list.Items))
-	for _, it := range list.Items {
-		var sel []string
-		for k, v := range it.Spec.Selector.MatchLabels {
-			sel = append(sel, k+"="+v)
-		}
-		sort.Strings(sel)
-		t := target{Kind: it.Kind, Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Selector: strings.Join(sel, ",")}
-		for _, c := range it.Spec.Template.Spec.Containers {
-			t.Containers = append(t.Containers, containerImage{c.Name, c.Image})
-		}
-		out = append(out, t)
-	}
-	return out, nil
-}
-
 // pickTargets: the picker opens at once and loads every workload of every
 // cluster (one row per workload per cluster: names may differ between
 // clusters), filtered by filter, which the user can edit. Marked rows (or the
 // one under the cursor) are returned. With a filter that matches exactly one
 // workload, no picker. all is every workload loaded (for callers that look
 // for the same workload on other clusters).
-func (a *app) pickTargets(k string, clusters []kube.Context, filter, title string, skipped *[]string) (chosen, all []target, err error) {
+func (a *app) pickTargets(cl kube.Client, clusters []kube.Context, filter, title string, skipped *[]string) (chosen, all []target, err error) {
 	byKey := map[string]target{}
 	load := func() ([]tui.Item, error) {
 		var sk []string
-		all, sk = a.findWorkloads(k, clusters, "")
+		all, sk = a.findWorkloads(cl, clusters, "")
 		*skipped = sk
 		if len(all) == 0 {
 			return nil, errors.New("no deployments, statefulsets or daemonsets found")
@@ -440,59 +324,6 @@ func runTargetPicker(o tui.Options, byKey map[string]target) ([]target, error) {
 		out = append(out, byKey[it.Key])
 	}
 	return out, nil
-}
-
-func runningPods(k, kubeconfig, ctxName, ns, selector string) ([]string, error) {
-	if selector == "" {
-		return nil, errors.New("workload has no matchLabels selector")
-	}
-	out, err := kubectlOut(k, kubeconfig, 30*time.Second, "--context", ctxName, "-n", ns, "get", "pods", "-l", selector, "-o", "json")
-	if err != nil {
-		return nil, err
-	}
-	ps, err := parsePods([]byte(out))
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, p := range ps {
-		if p.Phase == "Running" && p.Reason != "Terminating" {
-			names = append(names, p.Name)
-		}
-	}
-	sort.Strings(names)
-	return names, nil
-}
-
-func execInPod(k, kubeconfig, ctxName, ns, pod, container string, command []string) (string, error) {
-	args := []string{"--context", ctxName, "-n", ns, "exec", pod}
-	if container != "" {
-		args = append(args, "-c", container)
-	}
-	args = append(append(args, "--"), command...)
-	return kubectlOut(k, kubeconfig, 2*time.Minute, args...)
-}
-
-// kubectlOut runs kubectl with the master kubeconfig; the error carries its output.
-func kubectlOut(k, kubeconfig string, timeout time.Duration, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, k, args...)
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", kubeconfig)
-	var buf bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &buf, &buf
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		return buf.String(), fmt.Errorf("timed out after %s", timeout)
-	}
-	if err != nil {
-		msg := strings.TrimSpace(buf.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return buf.String(), errors.New(msg)
-	}
-	return buf.String(), nil
 }
 
 func lastLines(s string, n int) []string {

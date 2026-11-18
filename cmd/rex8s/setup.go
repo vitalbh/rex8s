@@ -18,6 +18,7 @@ import (
 	"github.com/vitalbh/rex8s/internal/pathx"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
+	"github.com/vitalbh/rex8s/internal/yamledit"
 	rexlua "github.com/vitalbh/rex8s/rex"
 )
 
@@ -26,7 +27,7 @@ import (
 var wrapperCmds = map[string]string{
 	"kctx": "switch", "kns": "ns", "kflux": "flux", "klogs": "logs",
 	"fwatch": "fwatch", "fdiff": "fdiff", "kpf": "kpf", "kauth": "kauth", "kexec": "kexec",
-	"kwarn": "kwarn", "kwhy": "kwhy", "kfail": "kfail", "kjobs": "kjobs", "kpods": "kpods", "kstatus": "kstatus",
+	"kwarn": "kwarn", "kwhy": "kwhy", "kfail": "kfail", "kjobs": "kjobs", "kpods": "kpods", "kview": "kview", "kstatus": "kstatus",
 	"krun": "krun", "kver": "kver", "kroll": "kroll", "kdiff": "kdiff", "knode": "knode",
 	"kask": "kask", "ktint": "ktint", "khelp": "khelp", "knet": "knet", "kwhat": "kwhat",
 	"kgrep": "kgrep", "kcron": "kcron", "kreq": "kreq", "kincident": "kincident",
@@ -373,7 +374,7 @@ func (a *app) doctor(args []string) error {
 	}
 	tool("kubectl", true, "everything needs it", "version", "--client")
 	tool("flux", false, "fdiff needs it (brew install fluxcd/tap/flux)", "--version")
-	tool("k9s", false, "the ⇧⌘K layout shows kstatus instead", "version", "--short")
+	tool("k9s", false, "optional: cluster_browser: k9s puts it in the ⇧⌘K layout (kview by default)", "version", "--short")
 	tool("claude", false, "kwhy and kask need it (or codex for kask)", "--version")
 	tool("codex", false, "optional: kask can use it (rex8s config set ask_agent codex)", "--version")
 	tool("gh", false, "optional", "--version")
@@ -400,7 +401,7 @@ func (a *app) doctor(args []string) error {
 		check(fileExists(filepath.Join(d, ".git")), true, "gitops_repos "+tildePath(d), "")
 	}
 	for _, f := range a.cfg.Forwards {
-		_, err := a.clusterContext(f.Cluster)
+		_, err := a.context(f.Cluster)
 		check(err == nil, true, "favorite forward "+f.Name, map[bool]string{true: "", false: "cluster " + f.Cluster + " not found"}[err == nil])
 	}
 
@@ -459,7 +460,7 @@ func (a *app) chooseAskAgent(step func(bool, string)) {
 		step(true, "kask opens claude (rex8s config set ask_agent codex to change)")
 		return
 	}
-	if err := a.editConfig(func(doc string) string { return setYAMLKey(doc, "ask_agent", it.Key) }); err != nil {
+	if err := a.editConfig(func(doc string) string { return yamledit.SetKey(doc, "ask_agent", it.Key) }); err != nil {
 		step(false, "could not save ask_agent: "+err.Error())
 		return
 	}

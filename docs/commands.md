@@ -5,11 +5,12 @@ pickers: arrows or `ctrl+p`/`ctrl+n` move, typing filters (fuzzy), `space`
 marks several where that makes sense, `enter` selects, `esc` quits.
 
 Most commands work on this pane's cluster; **`-A`** makes them work on every
-cluster. Splits you only watch (logs, port-forwards, `kwhy`'s answer) open
-without taking the focus, so you keep typing in your shell; the ones you type
-in (`kexec`, `knode`, `knet`, `kask`) take it.
+cluster. Splits you only watch (logs, `kwhy`'s answer) open without taking
+the focus, so you keep typing in your shell; the ones you type in (`kexec`,
+`knode`, `knet`, `kask`) take it. Port-forwards open no split: they run in the
+background.
 
-- [Keys](#keys) · [Panes](#panes) · [What's broken](#whats-broken) ·
+- [Keys](#keys) · [Panes](#panes) · [Browse](#browse) · [What's broken](#whats-broken) ·
   [Logs](#logs) · [Ask Claude](#ask-claude) · [Reach a service or a pod](#reach-a-service-or-a-pod) ·
   [Flux / GitOps](#flux--gitops) · [Across clusters](#across-clusters)
 
@@ -18,9 +19,10 @@ in (`kexec`, `knode`, `knet`, `kask`) take it.
 | | |
 |---|---|
 | `⇧⌘J` | pick cluster + namespace → new tab with an isolated shell |
-| `⇧⌘K` | same → new tab with k9s · shell · warnings |
+| `⇧⌘K` | same → new tab with `kview` · shell · warnings (`cluster_browser: k9s` for k9s) |
 | `⇧⌘M` | pick several clusters → a tab with one pane each, side by side |
-| `⇧⌘P` (palette) | **Kubernetes: Flux Monitor**, **Clusters Side by Side…**, **Restore Cluster Tabs** |
+| `⇧⌘V` | new tab with `kview -A`: every cluster, no picker |
+| `⇧⌘P` (palette) | **Kubernetes: Flux Monitor**, **Clusters Side by Side…**, **All Clusters (kview)**, **Restore Cluster Tabs** |
 
 Key bindings are at the bottom of `rex/rex8s.lua`.
 
@@ -35,12 +37,18 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   shows `PROD use/*`. `kubectl get`/`describe`/`top pods`/`events`, `helm list`
   and `flux get` add `-A` by themselves; a command on one object (`logs`,
   `exec`, `delete`…) asks for `-n` instead of guessing. The `k*` pickers list
-  every namespace, and k9s opens in all of them.
-- **Production guard**: `kubectl`/`helm`/`flux` commands that change state, and
-  `kexec` into a pod, ask you to type the cluster name first. With no terminal
-  to ask (an agent, a script) they are refused until re-run with
-  `REX8S_FORCE=1`. Production is detected by server URL, so every alias of the
-  same cluster is covered.
+  every namespace, and the ⇧⌘K browser opens on all of them.
+- **Production guard**: `kubectl`/`helm`/`flux` commands that change state
+  (`exec`, `debug`, `cp`, `flux reconcile` and `helm test` included), and the
+  rex8s commands that change a cluster (`kexec`, `knode`, `knet`, `krun`,
+  `kroll`, `kjunk`, kflux's reconcile), ask you to type the cluster name first.
+  A command the guard doesn't know (a kubectl plugin, a typo, an unknown flag
+  before the verb) asks too. With no terminal to ask (an agent, a script)
+  they are refused until re-run with `REX8S_FORCE=1`. Production is detected
+  by server URL, so every alias of the same cluster is covered, including
+  `--cluster`, `--server`, `--user` and `HELM_KUBECONTEXT`. Each decision
+  (confirmed, cancelled, refused, forced) is logged in
+  `~/.cache/rex8s/audit.log`.
 - **Expired logins** show up as "login expired" everywhere; picking such a
   cluster takes you straight to `kauth`.
 - **Tabs come back** after the Rex server restarts: the picker offers to
@@ -49,11 +57,47 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
 | | |
 |---|---|
 | `kctx [CTX]` / `kns [NS\|all]` | switch this pane's cluster / namespace (no argument: picker) |
-| `kauth [cluster]` | log in again when the credentials expired: opens the login page and reads the pasted `kubectl config` commands (only those) |
+| `kauth [cluster]` | log in again when the credentials expired: opens the login page and reads the pasted `kubectl config set-cluster`/`set-credentials`/`set-context`/`use-context` commands (only those, and never `--exec-*` or `--kubeconfig`) |
 | `ktint [#hex\|off] [--save]` | production background: presets previewed live on the pane (enter saves), or try a color here |
 | `khelp [filter]` | every command in a picker, with usage; enter runs it |
 | `rex8s use-context CTX` | the machine's default context (what `kubectl` uses outside rex8s panes) |
 | `REX8S_FORCE=1 kubectl …` | skip the production confirmation (scripts) |
+
+## Browse
+
+**`kview [-A | --context CTX] [pods|workloads|services|jobs|nodes|warnings]`** —
+the cluster in one screen, like k9s: a tab per kind of object (**tab** or
+**1–6** switch), each list refreshing by itself, and the cursor staying on its
+row as it does. **`/`** filters (every word, any column; **esc** clears), **R**
+reloads, **q** quits. `-A` lists every cluster's, production in red.
+
+| Tab | Keys |
+|---|---|
+| pods | **l** logs · **s** shell · **d** describe · **e** events · **y** YAML · **w** why · **a** ask · **ctrl+d** delete |
+| workloads | **enter** its pods · **l** logs of all its pods · **r** restart · **d** describe · **y** YAML |
+| services | **enter** port-forward in the background (as `kpf`), and the browser opens for HTTP · **d** describe · **y** YAML |
+| jobs | **l** logs · **r** run a CronJob now / rerun a Job · **d** describe · **y** YAML |
+| nodes | **s** shell on the node · **d** describe · **y** YAML |
+| warnings | **enter** describe the object |
+
+Logs and shells open in Rex splits (outside Rex, in place); describe, events
+and YAML open in a viewer (**q** back), cleaned of escape sequences. Delete,
+restart and run first ask **y/N** naming the object, its cluster and whether
+it is production (`delete pod default/web-7d9f on use (PROD)?`); they don't
+run while another action is still running. Then the command goes through the
+production guard like any `kubectl`: on production (or with a verb it can't
+classify) it shows the command and asks for the cluster's name;
+`REX8S_FORCE=1` skips that.
+
+**enter** on a workload shows exactly its pods (by its selector, in its
+cluster and namespace; **esc** shows them all again). With `-A` each cluster
+appears as soon as it answers; a cluster that doesn't answer is a dim
+`skipped …` row at the bottom, with "since … next try …" while it is backed
+off, and **R** tries every cluster again. The pane label keeps the cluster
+and production: `kview PROD use/payments`, `kview PROD all`.
+
+`rex8s browser CTX [NS]` is what the ⇧⌘K layout runs: kview, or k9s with
+`cluster_browser: k9s` (`rex8s k9s` still works, as an alias).
 
 ## What's broken
 
@@ -71,7 +115,7 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   ones that need attention first; same preview and actions as `kfail`.
   `kpods failing` is `kfail -A`.
 - **`kwarn [-n]`** — only Warning events (OOMKilled, BackOff, probes, image
-  pulls), deduplicated. Also the bottom pane of the k9s layout.
+  pulls), deduplicated. Also the bottom pane of the ⇧⌘K layout.
   **`kwarn -A [cluster…]`**: every cluster's (or the ones named) in one
   stream, each line led by its cluster.
 - **`kjobs [-n|-A] [failed|running|done|suspended|cron] [filter]`** — Jobs and
@@ -100,7 +144,11 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   `http://grafana.monitoring.svc.cluster.local:3000/…` opens that service, and a
   pod's own `Listening on http://0.0.0.0:8080` opens that pod. The text stays as
   logged; the link goes to a localhost port the log pane holds, and `kubectl
-  port-forward` only starts when you click.
+  port-forward` only starts when you click. Only services of the stream's
+  namespace are linked (`log_links: all` in the config links every namespace,
+  `off` none), only hosts `NAME.NS.svc` or `NAME.NS.svc.cluster.local`, and a
+  pane holds at most 64 ports (the least recently used one closes). Piped or
+  redirected (`klogs … | grep`), the lines come out as logged, without links.
 
 ## Ask Claude
 
@@ -132,9 +180,13 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   connected: it starts on the first connection, stops after 10 minutes idle
   and starts again on the next. The forward itself goes away after 8 hours
   without a connection (`forward_expire` in the config). A failed forward
-  answers HTTP with a page carrying kubectl's error.
+  answers HTTP with a page carrying kubectl's error. Its log is
+  `~/.cache/rex8s/pf/PORT.log`.
 - **`kpf -l`** — the running port-forwards: open, copy the URL, save as a
   favorite, stop. They also show in the Raycast Kube Context menu bar.
+  Forwards that died without cleaning up (killed, a crash) drop out of the
+  list by themselves; **`kpf --gc`** also removes their old logs. On a machine
+  without `open` (Linux), open and copy print the URL instead.
 - **`kpf NAME`** · **`kpf -f`** — a favorite from the config (`forwards:`):
   starts it in the background when needed and opens the browser (a database
   prints its URL and client command instead). `kpf -f` picks one. To make one,
@@ -164,7 +216,8 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   `gitops_repos` in the config), the file and line. Enter opens it in your
   editor (Cursor, VS Code, Zed or `$EDITOR`) or on GitHub.
 - **`kflux`** — Flux resources of this pane's cluster, failing first, with
-  their events: reconcile and wait, describe, suspend/resume.
+  their events: reconcile and wait, describe, suspend/resume (production asks
+  first).
 - **Flux monitor** (palette) — a dashboard of every cluster, with
   notifications when something starts failing or recovers; the tab name is the
   health summary.
@@ -190,13 +243,15 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   the other cluster, or mark two.
 - **`krun [-c container] [filter] [-- CMD…]`** — run a command in every pod of
   the workloads you mark, on any cluster. `krun nginx -- nginx -s reload` skips
-  the questions when one workload matches. Production asks once (y/N).
+  the questions when one workload matches. Production asks once (type the
+  cluster names).
 - **`kroll [filter]`** — `rollout restart` the workloads you mark and follow
-  each rollout, with progress in the tab header. Production asks once (y/N).
+  each rollout, with progress in the tab header. Production asks once (type
+  the cluster names).
 - **`kcron [duration] [filter]`** — what CronJobs run next on every cluster
   (default 6h), one timeline with how the last run went; frequent jobs are
   folded. `kcron 24h backup`.
 - **`kjunk [debug|pods|jobs|pv] [filter]`** — leftovers on every cluster: ended
   debug pods (`knode`, `knet`, `kubectl debug`), Failed/Evicted pods over a day
   old, Jobs finished over a week ago (not a CronJob's) and Released PVs. Mark
-  and delete; production asks once (y/N).
+  and delete; production asks once (type the cluster names).

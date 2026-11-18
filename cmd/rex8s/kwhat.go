@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
@@ -41,33 +42,16 @@ func (a *app) kwhat(args []string) error {
 	if err != nil {
 		return err
 	}
-	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 	fmt.Fprintln(os.Stderr, tui.Dim.Render(fmt.Sprintf("reading changes of the last %s on %d clusters…", fmtWindow(window), len(clusters))))
 
 	since := time.Now().Add(-window)
-	var mu sync.Mutex
-	var all []change
-	var skipped []string
-	var wg sync.WaitGroup
-	for _, c := range clusters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			cs, err := clusterChanges(cl, c, since)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				why := lastLogLine(err.Error())
-				if kube.AuthExpired(err) {
-					why = "login expired (kauth " + c.Short + ")"
-				}
-				skipped = append(skipped, c.Short+": skipped, "+why)
-				return
-			}
-			all = append(all, cs...)
-		}()
+	res := fleet.Read(a.readerFor(cl), clusters, [][]string{replicaSetsQuery},
+		func(c kube.Context, out [][]byte) ([]change, error) { return changesSince(cl, c, since, out[0]), nil })
+	all := make([]change, len(res.Rows))
+	for i, r := range res.Rows {
+		all[i] = r.V
 	}
-	wg.Wait()
 	fmt.Fprint(os.Stderr, "\033[1A\033[2K")
 
 	if filter != "" {
@@ -82,10 +66,7 @@ func (a *app) kwhat(args []string) error {
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].when.After(all[j].when) })
 	fmt.Print(renderChanges(all, window))
-	sort.Strings(skipped)
-	for _, s := range skipped {
-		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
-	}
+	printSkipped(res.Skipped)
 	return nil
 }
 
@@ -98,21 +79,32 @@ type change struct {
 	bad     bool
 }
 
+// replicaSetsQuery: the read a cluster must answer for its changes; the
+// others (ControllerRevisions, events) are best effort.
+var replicaSetsQuery = []string{"get", "replicasets", "-A", "-o", "json"}
+
+// clusterChanges: what changed on c since since.
 func clusterChanges(cl kube.Client, c kube.Context, since time.Time) ([]change, error) {
-	var rsOut, crOut, evOut []byte
-	var rsErr, crErr, evErr error
+	rsOut, err := cl.Get(c.Name, replicaSetsQuery...)
+	if err != nil {
+		return nil, err
+	}
+	return changesSince(cl, c, since, rsOut), nil
+}
+
+// changesSince: c's rollouts in rsOut (replicaSetsQuery's answer), plus the
+// StatefulSet/DaemonSet revisions and Flux's events, read here.
+func changesSince(cl kube.Client, c kube.Context, since time.Time, rsOut []byte) []change {
+	var crOut, evOut []byte
+	var crErr, evErr error
 	var wg sync.WaitGroup
-	wg.Add(3)
-	go func() { defer wg.Done(); rsOut, rsErr = cl.Get(c.Name, "get", "replicasets", "-A", "-o", "json") }()
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		crOut, crErr = cl.Get(c.Name, "get", "controllerrevisions", "-A", "-o", "json")
 	}()
 	go func() { defer wg.Done(); evOut, evErr = cl.Get(c.Name, "get", "events", "-A", "-o", "json") }()
 	wg.Wait()
-	if rsErr != nil {
-		return nil, rsErr
-	}
 	var out []change
 	out = append(out, rolloutChanges(rsOut, since)...)
 	if crErr == nil {
@@ -124,7 +116,7 @@ func clusterChanges(cl kube.Client, c kube.Context, since time.Time) ([]change, 
 	for i := range out {
 		out[i].cluster = c
 	}
-	return out, nil
+	return out
 }
 
 type ownedObj struct {

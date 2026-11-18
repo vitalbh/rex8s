@@ -4,11 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/vitalbh/rex8s/internal/guard"
+	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
@@ -22,7 +21,7 @@ func (a *app) kexec(args []string) error {
 		if err != nil || cp == nil {
 			return err
 		}
-		return a.shellIn(cp.c.Name, cp.p)
+		return a.shellIn(cp.C.Name, cp.V)
 	}
 	if len(args) > 0 {
 		filter = args[0]
@@ -31,12 +30,12 @@ func (a *app) kexec(args []string) error {
 	if err != nil || sel == nil {
 		return err
 	}
-	return a.shellIn(sel.ctx.Name, sel.pod)
+	return a.shellIn(sel.C.Name, sel.V)
 }
 
 // shellIn asks for the container when there are several, then opens the
 // shell in a split (here outside Rex). Production asks first (exectail).
-func (a *app) shellIn(ctxName string, p pod) error {
+func (a *app) shellIn(ctxName string, p kube.Pod) error {
 	container, ok, err := pickContainer(p, false)
 	if err != nil || !ok {
 		return err
@@ -64,22 +63,19 @@ func (a *app) exectail(ctxName, ns, podName, container string) error {
 	if container != "" {
 		target += " -c " + container
 	}
-	if c.Prod && !guard.Confirm(c.Short, "kubectl exec -it "+target+" ("+ns+")") {
-		return nil
+	if ok, err := confirmChange([]kube.Context{c}, "kexec: kubectl exec -it "+target+" ("+ns+")"); !ok {
+		return err
 	}
-	bin, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
-	args := []string{"--context", ctxName, "-n", ns, "exec", "-it", podName}
+	args := []string{"-n", ns, "exec", "-it", podName}
 	if container != "" {
 		args = append(args, "-c", container)
 	}
 	args = append(args, "--", "sh", "-c", "if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi")
-	cmd := exec.Command(bin, args...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-	if err := cmd.Run(); err != nil {
+	if err := cl.Run(ctxName, args...); err != nil {
 		fmt.Fprint(os.Stderr, tui.Dim.Render("\nshell ended ("+err.Error()+") · press enter to close"))
 		bufio.NewReader(os.Stdin).ReadString('\n')
 	}

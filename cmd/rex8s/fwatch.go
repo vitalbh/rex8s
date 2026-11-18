@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
@@ -132,25 +133,7 @@ func (a *app) watchTargets(all bool) ([]kube.Context, error) {
 	if err != nil {
 		return nil, err
 	}
-	return dedupe(kube.Contexts(raw, a.cfg)), nil
-}
-
-// dedupe keeps one context per server (the first, contexts are sorted).
-func dedupe(ctxs []kube.Context) []kube.Context {
-	seen := map[string]bool{}
-	var out []kube.Context
-	for _, c := range ctxs {
-		key := c.Server
-		if key == "" {
-			key = c.Name
-		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, c)
-	}
-	return out
+	return fleet.All(raw, a.cfg), nil
 }
 
 // ── git side ────────────────────────────────────────────────────────────
@@ -456,7 +439,7 @@ func evaluateRollout(ws []kube.Workload, baseline map[string]baselineEntry, ks m
 		case w.RolledOut():
 			u.rolled++
 		default:
-			waiting = append(waiting, fmt.Sprintf("%s/%s %d/%d", kube.ShortKind(w.Kind), w.Name, w.Ready, w.Desired))
+			waiting = append(waiting, fmt.Sprintf("%s/%s %d/%d", kube.ShortKind(w.Kind), w.Name, w.Available, w.Desired))
 		}
 	}
 	if u.rolled == u.rolling {

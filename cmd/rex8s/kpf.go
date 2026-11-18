@@ -1,106 +1,21 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"os"
-	"os/exec"
-	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/vitalbh/rex8s/internal/kube"
-	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
-type svcPort struct {
-	Name        string
-	Port        int
-	Protocol    string
-	AppProtocol string
-}
-
-type service struct {
-	Namespace string
-	Name      string
-	Type      string
-	Ports     []svcPort
-}
-
-func parseServices(data []byte) ([]service, error) {
-	var list struct {
-		Items []struct {
-			Metadata struct {
-				Name      string `json:"name"`
-				Namespace string `json:"namespace"`
-			} `json:"metadata"`
-			Spec struct {
-				Type  string `json:"type"`
-				Ports []struct {
-					Name        string `json:"name"`
-					Port        int    `json:"port"`
-					Protocol    string `json:"protocol"`
-					AppProtocol string `json:"appProtocol"`
-				} `json:"ports"`
-			} `json:"spec"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(data, &list); err != nil {
-		return nil, err
-	}
-	out := make([]service, 0, len(list.Items))
-	for _, it := range list.Items {
-		s := service{Namespace: it.Metadata.Namespace, Name: it.Metadata.Name, Type: it.Spec.Type}
-		for _, p := range it.Spec.Ports {
-			if p.Protocol == "" || p.Protocol == "TCP" { // port-forward is TCP only
-				s.Ports = append(s.Ports, svcPort{Name: p.Name, Port: p.Port, Protocol: "TCP", AppProtocol: p.AppProtocol})
-			}
-		}
-		if len(s.Ports) > 0 {
-			out = append(out, s)
-		}
-	}
-	return out, nil
-}
-
-func (s service) portsText() string {
-	parts := make([]string, len(s.Ports))
-	for i, p := range s.Ports {
-		parts[i] = strconv.Itoa(p.Port)
-		if p.Name != "" {
-			parts[i] += "/" + p.Name
-		}
-	}
-	return strings.Join(parts, " ")
-}
-
-// freePort returns want if it is free on localhost, otherwise a random free port.
-func freePort(want int) int {
-	if want > 1024 {
-		if l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(want)); err == nil {
-			l.Close()
-			return want
-		}
-	}
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return want
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
-}
-
 // kpf: pick a service (and port) — every namespace, this pane's first; -n
-// only this namespace; -A every cluster — and port-forward it in a pane next
-// to this one. kpf -l lists the running ones; kpf --stop PID stops one (for
-// Raycast).
+// only this namespace; -A every cluster — and port-forward it in the
+// background (pfbg), printing the URL. kpf -l lists the running ones;
+// kpf --stop PID stops one (for Raycast); kpf --gc cleans up after forwards
+// that died.
 func (a *app) kpf(args []string) error {
 	filter, onlyNS := "", false
 	if len(args) > 0 && args[0] == "-A" {
@@ -138,6 +53,11 @@ func (a *app) kpf(args []string) error {
 				}
 			}
 			return fmt.Errorf("no port-forward with pid %d", pid)
+		case "--gc":
+			for _, f := range a.registry().GC() {
+				fmt.Println("removed " + f)
+			}
+			return nil
 		case "--stop":
 			if len(args) < 2 {
 				return errors.New("kpf --stop PID")
@@ -146,7 +66,7 @@ func (a *app) kpf(args []string) error {
 			if err != nil {
 				return fmt.Errorf("bad pid %q", args[1])
 			}
-			return a.pfStop(pid)
+			return a.registry().Stop(pid)
 		}
 		if f, ok := a.favorite(args[0]); ok {
 			return a.kpfFavorite(f)
@@ -167,7 +87,7 @@ func (a *app) kpf(args []string) error {
 		scope, where = []string{"-n", here}, c.Short+"/"+here
 	}
 
-	svcs := map[string]service{}
+	svcs := map[string]kube.Service{}
 	it, err := tui.Run(tui.Options{
 		Title: "Port-forward · services in " + where,
 		Query: filter,
@@ -176,7 +96,7 @@ func (a *app) kpf(args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			ss, err := parseServices(out)
+			ss, err := kube.ParseServices(out)
 			if err != nil {
 				return nil, err
 			}
@@ -202,7 +122,7 @@ func (a *app) kpf(args []string) error {
 				key := s.Namespace + "/" + s.Name
 				svcs[key] = s
 				items = append(items, tui.Item{Key: key, Label: fmt.Sprintf("%-*s", w, key),
-					Hint: fmt.Sprintf("%-12s %s", s.Type, s.portsText())})
+					Hint: fmt.Sprintf("%-12s %s", s.Type, s.PortsText())})
 			}
 			return items, nil
 		},
@@ -214,8 +134,8 @@ func (a *app) kpf(args []string) error {
 }
 
 // kpfStart asks for the port when the service has several, then starts the
-// forward on a free local port: in a pane next to this one, or here outside Rex.
-func (a *app) kpfStart(c kube.Context, s service) error {
+// forward in the background on a free local port.
+func (a *app) kpfStart(c kube.Context, s kube.Service) error {
 	ns := s.Namespace
 	port := s.Ports[0]
 	if len(s.Ports) > 1 {
@@ -232,53 +152,4 @@ func (a *app) kpfStart(c kube.Context, s service) error {
 	}
 
 	return a.lazyStart(c, ns, s.Name, port)
-}
-
-// pftail runs the port-forward in its own pane until closed.
-func (a *app) pftail(ctxName, ns, svc, mapping string) error {
-	c, err := a.context(ctxName)
-	if err != nil {
-		return err
-	}
-	// "auto:PORT" (from Raycast): pick a free local port now
-	if l, remote, ok := strings.Cut(mapping, ":"); ok && l == "auto" {
-		n, _ := strconv.Atoi(remote)
-		mapping = fmt.Sprintf("%d:%s", freePort(n), remote)
-	}
-	local, _, _ := strings.Cut(mapping, ":")
-	rex.Rename(fmt.Sprintf("pf %s/%s :%s", c.Short, svc, local))
-	a.tint(c)
-	bin, err := a.kubectl()
-	if err != nil {
-		return err
-	}
-	fmt.Printf("%s  %s → %s\n%s\n\n",
-		tui.Bold.Render("port-forward"), "svc/"+svc+" ("+c.Short+"/"+ns+")",
-		tui.Ok.Render("http://localhost:"+local), tui.Dim.Render("close this pane (or ctrl+c) to stop"))
-	cmd := exec.Command(bin, "--context", ctxName, "-n", ns, "port-forward", "svc/"+svc, mapping)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	lp, _ := strconv.Atoi(local)
-	rp, _ := strconv.Atoi(strings.SplitN(mapping, ":", 2)[1])
-	unregister := a.pfRegister(pfEntry{PID: os.Getpid(), Context: ctxName, Short: c.Short, Prod: c.Prod,
-		Namespace: ns, Service: svc, Local: lp, Remote: rp, Started: time.Now()})
-	defer unregister()
-
-	// stopped from kpf -l or Raycast: end the forward and close the pane
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		<-sig
-		_ = cmd.Process.Kill()
-		unregister()
-		rex.CloseSelf()
-		os.Exit(0)
-	}()
-	_ = cmd.Wait()
-	fmt.Fprint(os.Stderr, tui.Dim.Render("\nport-forward ended · press enter to close"))
-	bufio.NewReader(os.Stdin).ReadString('\n')
-	return nil
 }

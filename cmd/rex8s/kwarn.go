@@ -2,13 +2,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
+	"sort"
 	"time"
 
 	"github.com/vitalbh/rex8s/internal/kube"
@@ -62,18 +63,17 @@ func (a *app) warnings(ctxName, ns string) error {
 	}
 	rex.Rename("warnings " + c.Short + "/" + label)
 	a.tint(c)
-	bin, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
-	args := []string{"--context", ctxName, "get", "events", "--field-selector", "type=Warning", "-w", "-o", "json"}
+	args := []string{"get", "events", "--field-selector", "type=Warning", "-w", "-o", "json"}
 	if ns == "" {
 		args = append(args, "-A")
 	} else {
 		args = append(args, "-n", ns)
 	}
-	cmd := exec.Command(bin, args...)
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
+	cmd := cl.Command(context.Background(), ctxName, args...)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -83,59 +83,37 @@ func (a *app) warnings(ctxName, ns string) error {
 		return err
 	}
 	fmt.Println(tui.Bold.Render("Warnings") + tui.Dim.Render(" · "+c.Short+" · "+scope+" · repeats shown at most once a minute"))
-	streamWarnings(out, os.Stdout, ns == "")
+	streamWarnings(out, os.Stdout, ns == "", nil)
 	err = cmd.Wait()
 	fmt.Fprint(os.Stderr, tui.Dim.Render("\nwatch ended · press enter to close"))
 	bufio.NewReader(os.Stdin).ReadString('\n')
 	return err
 }
 
-type warnEvent struct {
-	Metadata struct {
-		UID       string `json:"uid"`
-		Namespace string `json:"namespace"`
-	} `json:"metadata"`
-	InvolvedObject struct {
-		Kind string `json:"kind"`
-		Name string `json:"name"`
-	} `json:"involvedObject"`
-	Reason        string    `json:"reason"`
-	Message       string    `json:"message"`
-	Count         int       `json:"count"`
-	LastTimestamp time.Time `json:"lastTimestamp"`
-	EventTime     time.Time `json:"eventTime"`
-	Series        *struct {
-		Count            int       `json:"count"`
-		LastObservedTime time.Time `json:"lastObservedTime"`
-	} `json:"series"`
-}
-
-// streamWarnings formats a stream of event JSON objects, showing each event
-// at most once a minute (repeating events like BackOff update constantly).
-func streamWarnings(r io.Reader, w io.Writer, showNS bool) {
+// streamWarnings formats a stream of event JSON objects. seen decides which
+// to show (nil: a new one); keep it across watches of the same cluster, so
+// a watch that starts again does not show its relist a second time. Text
+// from the cluster goes through tui.Clean: an app's output in a message
+// cannot send escape sequences to the terminal.
+func streamWarnings(r io.Reader, w io.Writer, showNS bool, seen *warnSeen) {
+	if seen == nil {
+		seen = newWarnSeen()
+	}
 	dec := json.NewDecoder(r)
-	shown := map[string]time.Time{}
 	for {
-		var e warnEvent
+		var e kube.Event
 		if err := dec.Decode(&e); err != nil {
 			if !errors.Is(err, io.EOF) {
 				fmt.Fprintln(w, tui.Err.Render("decode: "+err.Error()))
 			}
 			return
 		}
-		if last, ok := shown[e.Metadata.UID]; ok && time.Since(last) < time.Minute {
-			continue
-		}
-		shown[e.Metadata.UID] = time.Now()
-		when, count := e.LastTimestamp, e.Count
-		if when.IsZero() {
-			when = e.EventTime
-		}
+		when, count := e.When(), e.Count
 		if e.Series != nil {
 			count = e.Series.Count
-			if !e.Series.LastObservedTime.IsZero() {
-				when = e.Series.LastObservedTime
-			}
+		}
+		if !seen.show(e.Metadata.UID, when, count) {
+			continue
 		}
 		obj := kube.ShortKind(e.InvolvedObject.Kind) + "/" + e.InvolvedObject.Name
 		if showNS {
@@ -147,6 +125,77 @@ func streamWarnings(r io.Reader, w io.Writer, showNS bool) {
 		}
 		fmt.Fprintf(w, "%s %s %s%s %s\n",
 			tui.Dim.Render(when.Local().Format("15:04:05")),
-			tui.Warn.Render(e.Reason), obj, reps, truncate(oneLine(e.Message), 240))
+			tui.Warn.Render(oneLine(tui.Clean(e.Reason))), oneLine(tui.Clean(obj)), reps,
+			truncate(oneLine(tui.Clean(e.Message)), 240))
+	}
+}
+
+// warnSeen remembers the Warning events already shown: an event comes back
+// unchanged when a watch starts again (it relists), and a repeating one
+// (BackOff) is updated constantly. It is bounded: entries not shown for
+// seenTTL go (the API server keeps events an hour by default), and past
+// seenMax the oldest go.
+type warnSeen struct {
+	m      map[string]seenEvent // by event UID
+	now    func() time.Time
+	pruned time.Time
+}
+
+type seenEvent struct {
+	shown time.Time // when it was printed
+	when  time.Time // the event's last occurrence then
+	count int
+}
+
+const (
+	seenTTL = 2 * time.Hour
+	seenMax = 5000
+)
+
+func newWarnSeen() *warnSeen {
+	return &warnSeen{m: map[string]seenEvent{}, now: time.Now}
+}
+
+// show reports whether the event should be printed, and if so records it:
+// not when it is unchanged since it was shown, and at most once a minute.
+func (s *warnSeen) show(uid string, when time.Time, count int) bool {
+	now := s.now()
+	if p, ok := s.m[uid]; ok {
+		if p.count == count && p.when.Equal(when) {
+			return false
+		}
+		if now.Sub(p.shown) < time.Minute {
+			return false
+		}
+	}
+	s.m[uid] = seenEvent{shown: now, when: when, count: count}
+	s.prune(now)
+	return true
+}
+
+func (s *warnSeen) prune(now time.Time) {
+	if len(s.m) <= seenMax && now.Sub(s.pruned) < 10*time.Minute {
+		return
+	}
+	s.pruned = now
+	for uid, e := range s.m {
+		if now.Sub(e.shown) > seenTTL {
+			delete(s.m, uid)
+		}
+	}
+	if len(s.m) <= seenMax {
+		return
+	}
+	type aged struct {
+		uid   string
+		shown time.Time
+	}
+	all := make([]aged, 0, len(s.m))
+	for uid, e := range s.m {
+		all = append(all, aged{uid, e.shown})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].shown.Before(all[j].shown) })
+	for _, a := range all[:len(all)-seenMax*3/4] {
+		delete(s.m, a.uid)
 	}
 }

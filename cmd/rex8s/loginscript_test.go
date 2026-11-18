@@ -74,9 +74,37 @@ func TestParseScriptRefuses(t *testing.T) {
 		"cat << EOF > ~/.ssh/authorized_keys\nkey\nEOF",
 		"mkdir -p ~/.kube/../.ssh",
 		"kubectl config set-credentials u && rm -rf ~",
+		// kubectl config: only the four subcommands, no --exec-*, no --kubeconfig
+		"kubectl config view --raw",
+		"kubectl config unset users.me",
+		"kubectl config delete-context use",
+		"kubectl config rename-context a b",
+		"kubectl config set users.me.exec.command /tmp/x",
+		"kubectl config set-credentials me --exec-command=/tmp/x",
+		"kubectl config set-credentials me --exec-command /tmp/x",
+		"kubectl config set-credentials me --exec-arg=-c --exec-api-version=client.authentication.k8s.io/v1",
+		"kubectl config set-credentials me --exec-env=A=b",
+		"kubectl config set-cluster c --server=https://k8s.example.com --kubeconfig=/tmp/other",
+		"kubectl config set-context c --kubeconfig /tmp/other",
+		"kubectl config use-context c --kubeconfig=/tmp/other",
+		"kubectl --kubeconfig=/tmp/other config set-context c",
 	} {
 		if _, err := parseScript(s, "/home/me"); err == nil {
 			t.Errorf("must refuse %q", s)
+		}
+	}
+}
+
+func TestParseScriptAcceptsConfig(t *testing.T) {
+	for _, s := range []string{
+		"kubectl config set-cluster c --server=https://k8s.example.com --certificate-authority=~/.kube/ca.crt",
+		"kubectl config set-credentials me --token=abc",
+		"kubectl config set-credentials me --auth-provider=oidc --auth-provider-arg=client-id=x",
+		"kubectl config set-context c --cluster=c --user=me --namespace=api",
+		"kubectl config use-context c",
+	} {
+		if _, err := parseScript(s, "/home/me"); err != nil {
+			t.Errorf("%q: %v", s, err)
 		}
 	}
 }

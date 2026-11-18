@@ -5,7 +5,9 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
@@ -24,17 +26,18 @@ func (a *app) kver(args []string) error {
 			filter = arg
 		}
 	}
-	k, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
+	cl.Timeout = 30 * time.Second
 	raw, err := kube.Load(a.src)
 	if err != nil {
 		return err
 	}
-	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 	fmt.Fprintln(os.Stderr, tui.Dim.Render(fmt.Sprintf("reading workloads on %d clusters…", len(clusters))))
-	ws, skipped := a.findWorkloads(k, clusters, filter)
+	ws, skipped := a.findWorkloads(cl, clusters, filter)
 	var live []kube.Context // clusters that answered: one column each
 	down := map[string]bool{}
 	for _, s := range skipped {

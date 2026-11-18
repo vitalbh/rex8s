@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 )
@@ -48,47 +48,65 @@ func (a *app) alertsAll() ([]clusterAlertsJSON, error) {
 	if err != nil {
 		return nil, err
 	}
-	clusters := dedupe(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 	cl, err := a.client(a.src)
 	if err != nil {
 		return nil, err
 	}
 	cl.Timeout = 20 * time.Second
-	out := make([]clusterAlertsJSON, len(clusters))
-	var wg sync.WaitGroup
-	for i, c := range clusters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			j := clusterAlertsJSON{Context: c.Name, Short: c.Short, Prod: c.Prod, Alerts: []alertJSON{}}
-			if _, err := cl.Get(c.Name, "auth", "whoami", "-o", "name"); err != nil && kube.AuthExpired(err) {
-				j.Error, j.LoginExpired = lastLogLine(err.Error()), true
-				out[i] = j
-				return
-			}
-			for _, src := range alertSources(cl, c.Name) {
-				as, err := src.fetch(cl, c.Name)
-				if err != nil {
-					j.Error = lastLogLine(err.Error())
-					continue
-				}
-				j.Error, j.Source = "", src.ns+"/"+src.name
-				if len(as) == 0 && src.kind == "prometheus" && !prometheusHasRules(cl, c.Name, src.base()) {
-					j.NoRules = true
-					continue // maybe another source has them
-				}
-				j.NoRules = false
-				for _, al := range as {
-					j.Alerts = append(j.Alerts, alertJSON{al.Name, al.Severity, oneLine(al.Summary), al.Where})
-				}
-				sort.SliceStable(j.Alerts, func(x, y int) bool { return sevRank(j.Alerts[x].Severity) < sevRank(j.Alerts[y].Severity) })
-				break
-			}
-			out[i] = j
-		}()
+	// no fleet query: the reader only probes each cluster (an unreachable one
+	// fails fast), clusterAlerts does the reading; every cluster gets a row
+	res := fleet.Read(a.readerFor(cl), clusters, nil, func(c kube.Context, _ [][]byte) ([]clusterAlertsJSON, error) {
+		return []clusterAlertsJSON{clusterAlerts(cl, c)}, nil
+	})
+	byName := map[string]clusterAlertsJSON{}
+	for _, r := range res.Rows {
+		byName[r.C.Name] = r.V
 	}
-	wg.Wait()
+	for _, s := range res.Skipped {
+		byName[s.Cluster.Name] = clusterAlertsJSON{Error: s.Reason, LoginExpired: s.Expired}
+	}
+	out := make([]clusterAlertsJSON, len(clusters))
+	for i, c := range clusters {
+		j := byName[c.Name]
+		j.Context, j.Short, j.Prod = c.Name, c.Short, c.Prod
+		if j.Alerts == nil {
+			j.Alerts = []alertJSON{}
+		}
+		out[i] = j
+	}
 	return out, nil
+}
+
+// clusterAlerts reads c's firing alerts from the first alert source that
+// answers.
+func clusterAlerts(cl kube.Client, c kube.Context) clusterAlertsJSON {
+	var j clusterAlertsJSON
+	// whoami tells an expired login apart; its other errors (an API server
+	// too old for it) do not matter here
+	if _, err := cl.Get(c.Name, "auth", "whoami", "-o", "name"); err != nil && kube.AuthExpired(err) {
+		j.Error, j.LoginExpired = lastLogLine(err.Error()), true
+		return j
+	}
+	for _, src := range alertSources(cl, c.Name) {
+		as, err := src.fetch(cl, c.Name)
+		if err != nil {
+			j.Error = lastLogLine(err.Error())
+			continue
+		}
+		j.Error, j.Source = "", src.ns+"/"+src.name
+		if len(as) == 0 && src.kind == "prometheus" && !prometheusHasRules(cl, c.Name, src.base()) {
+			j.NoRules = true
+			continue // maybe another source has them
+		}
+		j.NoRules = false
+		for _, al := range as {
+			j.Alerts = append(j.Alerts, alertJSON{al.Name, al.Severity, oneLine(al.Summary), al.Where})
+		}
+		sort.SliceStable(j.Alerts, func(x, y int) bool { return sevRank(j.Alerts[x].Severity) < sevRank(j.Alerts[y].Severity) })
+		break
+	}
+	return j
 }
 
 // notifyNewCritical: a macOS notification per cluster for critical alerts

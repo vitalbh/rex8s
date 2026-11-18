@@ -237,13 +237,13 @@ func statusPods(cl kube.Client, ctxName string) section {
 	if err != nil {
 		return errSection("Pods", err)
 	}
-	ps, err := parsePods(out)
+	ps, err := kube.ParsePods(out)
 	if err != nil {
 		return errSection("Pods", err)
 	}
 	count := map[string]int{}
 	for _, p := range ps {
-		count[p.badge()]++
+		count[p.Badge()]++
 	}
 	s := section{name: "Pods"}
 	first := fmt.Sprintf("%d running", count["ok"])
@@ -292,7 +292,7 @@ func statusWorkloads(cl kube.Client, ctxName string) section {
 		case w.InProgress() && !w.Failed:
 			rolling = append(rolling, fmt.Sprintf("%s %s/%s", kube.ShortKind(w.Kind), w.Namespace, w.Name))
 		default:
-			state := fmt.Sprintf("%d/%d", w.Ready, w.Desired)
+			state := fmt.Sprintf("%d/%d", w.Available, w.Desired)
 			if w.Failed {
 				state = "stuck" // ProgressDeadlineExceeded
 			}
@@ -356,13 +356,13 @@ func statusJobs(cl kube.Client, ctxName string) section {
 	if err != nil {
 		return errSection("Jobs", err)
 	}
-	jobs, err := parseJobs(jout)
+	jobs, err := kube.ParseJobs(jout)
 	if err != nil {
 		return errSection("Jobs", err)
 	}
-	var crons []cronJob
+	var crons []kube.CronJob
 	if cout, err := cl.Get(ctxName, "get", "cronjobs", "-A", "-o", "json"); err == nil {
-		crons, _ = parseCronJobs(cout)
+		crons, _ = kube.ParseCronJobs(cout)
 	}
 	if len(jobs) == 0 && len(crons) == 0 {
 		return section{skip: true}
@@ -671,7 +671,7 @@ func statusCerts(cl kube.Client, ctxName string) section {
 			}
 		}
 		if t := c.Status.NotAfter; t != nil && time.Until(*t) < 14*24*time.Hour {
-			problems = append(problems, fmt.Sprintf("%s expires in %s", name, age(time.Now().Add(-time.Until(*t)))))
+			problems = append(problems, fmt.Sprintf("%s expires in %s", name, kube.Age(time.Now().Add(-time.Until(*t)))))
 		}
 	}
 	first := plural(len(list.Items), "certificate")

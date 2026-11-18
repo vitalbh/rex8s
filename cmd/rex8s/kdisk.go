@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
@@ -37,7 +38,7 @@ func (a *app) kdisk(args []string) error {
 		if err != nil {
 			return err
 		}
-		clusters = uniqueClusters(kube.Contexts(raw, a.cfg))
+		clusters = fleet.All(raw, a.cfg)
 	} else {
 		c, err := kube.Current(a.cfg, "", "")
 		if err != nil {
@@ -52,29 +53,12 @@ func (a *app) kdisk(args []string) error {
 	cl.Timeout = 30 * time.Second
 	fmt.Fprintln(os.Stderr, tui.Dim.Render(fmt.Sprintf("reading volume usage from the nodes of %d cluster(s)…", len(clusters))))
 
-	var mu sync.Mutex
-	var vols []diskUse
-	var skipped []string
-	var wg sync.WaitGroup
-	for _, c := range clusters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			vs, err := clusterDisks(cl, c)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				why := lastLogLine(err.Error())
-				if kube.AuthExpired(err) {
-					why = "login expired (kauth " + c.Short + ")"
-				}
-				skipped = append(skipped, c.Short+": skipped, "+why)
-				return
-			}
-			vols = append(vols, vs...)
-		}()
+	res := fleet.Read(a.readerFor(cl), clusters, [][]string{{"get", "nodes", "-o", "json"}},
+		func(c kube.Context, out [][]byte) ([]diskUse, error) { return clusterDisks(cl, c, out[0]) })
+	vols := make([]diskUse, len(res.Rows))
+	for i, r := range res.Rows {
+		vols[i] = r.V
 	}
-	wg.Wait()
 	fmt.Fprint(os.Stderr, "\033[1A\033[2K")
 	if filter != "" {
 		f := strings.ToLower(filter)
@@ -87,10 +71,7 @@ func (a *app) kdisk(args []string) error {
 		vols = kept
 	}
 	fmt.Print(renderDisks(vols, all, len(clusters) > 1))
-	sort.Strings(skipped)
-	for _, s := range skipped {
-		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
-	}
+	printSkipped(res.Skipped)
 	return nil
 }
 
@@ -106,12 +87,10 @@ type diskUse struct {
 
 func (d diskUse) pct() float64 { return pct(d.used, d.size) }
 
-func clusterDisks(cl kube.Client, c kube.Context) ([]diskUse, error) {
-	out, err := cl.Get(c.Name, "get", "nodes", "-o", "json")
-	if err != nil {
-		return nil, err
-	}
-	nodes, err := parseNodes(out)
+// clusterDisks measures the volumes on c's ready nodes (nodesJSON: `get
+// nodes -o json`), asking each node's kubelet.
+func clusterDisks(cl kube.Client, c kube.Context, nodesJSON []byte) ([]diskUse, error) {
+	nodes, err := kube.ParseNodes(nodesJSON)
 	if err != nil {
 		return nil, err
 	}

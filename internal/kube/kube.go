@@ -3,17 +3,11 @@
 package kube
 
 import (
-	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 
 	"k8s.io/client-go/tools/clientcmd"
 	api "k8s.io/client-go/tools/clientcmd/api"
@@ -27,6 +21,7 @@ type Context struct {
 	Cluster   string
 	User      string
 	Server    string
+	ProxyURL  string // the cluster's proxy-url, if any
 	Namespace string
 	Short     string
 	Prod      bool
@@ -81,7 +76,7 @@ func describe(raw *api.Config, cfg *config.Config, name string, c *api.Context) 
 		ctx.Namespace, ctx.AllNS = "", true
 	}
 	if cl := raw.Clusters[c.Cluster]; cl != nil {
-		ctx.Server = cl.Server
+		ctx.Server, ctx.ProxyURL = cl.Server, cl.ProxyURL
 	}
 	ctx.Short, ctx.Prod = cfg.Lookup(ctx.Server, name)
 	return ctx
@@ -186,83 +181,9 @@ func Current(cfg *config.Config, ctxOverride, kubeconfigOverride string) (Contex
 	return describe(raw, cfg, name, c), nil
 }
 
-// ── queries via kubectl ─────────────────────────────────────────────────
-
-type Client struct {
-	Kubectl    string
-	Kubeconfig string
-	Timeout    time.Duration
-}
-
-func (k Client) run(ctxName string, args ...string) ([]byte, error) {
-	t := k.Timeout
-	if t == 0 {
-		t = 10 * time.Second
-	}
-	c, cancel := context.WithTimeout(context.Background(), t)
-	defer cancel()
-	// KUBECONFIG instead of --kubeconfig: the master may be a list of files.
-	var full []string
-	if ctxName != "" {
-		full = append(full, "--context", ctxName)
-	}
-	full = append(full, args...)
-	full = append(full, fmt.Sprintf("--request-timeout=%ds", int(t.Seconds())-1))
-	cmd := exec.CommandContext(c, k.Kubectl, full...)
-	cmd.Env = withKubeconfig(os.Environ(), k.Kubeconfig)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		msg := lastLine(stderr.String())
-		if errors.Is(c.Err(), context.DeadlineExceeded) {
-			msg = "timeout"
-		}
-		if msg == "" {
-			msg = err.Error()
-		}
-		return nil, errors.New(msg)
-	}
-	return out, nil
-}
-
-// Get runs a read-only kubectl command against ctxName and returns stdout.
-func (k Client) Get(ctxName string, args ...string) ([]byte, error) { return k.run(ctxName, args...) }
-
-var nsCache sync.Map // kubeconfig|ctx → []string
-
-// Namespaces lists namespaces (cached in memory per process).
-func (k Client) Namespaces(ctxName string) ([]string, error) {
-	key := k.Kubeconfig + "|" + ctxName
-	if v, ok := nsCache.Load(key); ok {
-		return v.([]string), nil
-	}
-	out, err := k.run(ctxName, "get", "ns", "-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, l := range strings.Split(string(out), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			names = append(names, l)
-		}
-	}
-	nsCache.Store(key, names)
-	return names, nil
-}
-
-func lastLine(s string) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	return strings.TrimSpace(lines[len(lines)-1])
-}
-
-// withKubeconfig returns env with KUBECONFIG set to path (replacing any value).
-func withKubeconfig(env []string, path string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, e := range env {
-		if !strings.HasPrefix(e, "KUBECONFIG=") {
-			out = append(out, e)
-		}
-	}
-	return append(out, "KUBECONFIG="+path)
+// On is a value read from a cluster (a pod, a service…) with the context it
+// came from. Multi-cluster lists are []On[T].
+type On[T any] struct {
+	C Context
+	V T
 }

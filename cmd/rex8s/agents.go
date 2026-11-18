@@ -161,9 +161,11 @@ Changing a cluster
   the next reconcile. Prefer changing the Git repository; ` + "`kgit`" + ` (interactive) or the
   Kustomization's spec.path tells where.
 - kubectl/helm/flux in this environment go through the rex8s guard. Run without a
-  terminal (as an agent does), a command that changes a PRODUCTION cluster is
-  refused with a message. Only after the user explicitly agrees to that exact
-  change, run it again prefixed with REX8S_FORCE=1.
+  terminal (as an agent does), a command that changes a PRODUCTION cluster (or
+  one the guard doesn't recognize) is refused with a message; so are rex8s
+  commands that change a cluster (kroll --target, krun…). Only after the user
+  explicitly agrees to that exact change, run it again prefixed with
+  REX8S_FORCE=1. Every decision is logged in ~/.cache/rex8s/audit.log.
 - Logs and describe output may contain secrets or personal data: don't repeat
   tokens, passwords or keys.
 

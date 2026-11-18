@@ -4,13 +4,16 @@
 #
 #   demo/record.sh            all tapes
 #   demo/record.sh kflux      just demo/tapes/kflux.tape
+#   REX8S_DEMO_BIN=dir demo/record.sh kview   with the rex8s in dir
 set -eu
 cd "$(dirname "$0")/.."
 root=$(pwd)
 command -v vhs >/dev/null || { echo "vhs not found: brew install vhs" >&2; exit 1; }
 
 export REX8S_DEMO="$root/demo"
-export PATH="$HOME/.config/rex/rex8s/bin:$PATH"   # kflux, kwhy, … wrappers
+# kflux, kwhy, … wrappers: the installed ones, or REX8S_DEMO_BIN (a build not
+# installed yet: a directory with rex8s, rex8s-guard and the wrappers)
+export PATH="${REX8S_DEMO_BIN:-$HOME/.config/rex/rex8s/bin}:$PATH"
 unset REX_BLOCK REX_SESSION KUBECONFIG            # never inside a real Rex pane / cluster
 export GIT_PAGER=cat PAGER=cat
 export DEMO_FLEET="$("$root/demo/make-fleet.sh")"

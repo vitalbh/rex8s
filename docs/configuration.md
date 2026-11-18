@@ -10,6 +10,8 @@ lists the settings; `rex8s config set KEY VALUE`, `unset KEY`, and
 `add`/`remove KEY VALUE` for lists change them without touching the rest of the
 file (comments included) — refusing if you saved the file meanwhile, and undoing
 a change that would break it. Clusters and forwards are edited in the file.
+Unknown keys and values rex8s can't use are reported as warnings when a
+command runs (the default applies), not errors.
 
 ```yaml
 kubeconfig: ~/.kube/config                 # or a list like KUBECONFIG: ~/.kube/config:~/.kube/lab.yaml
@@ -19,7 +21,9 @@ clusters:                                  # match = substring of the server URL
   - { match: staging.example.com,     name: staging }
 prod_background: "#2b1216"                 # tint for production panes
 monitor_interval: 2m                       # Flux monitor poll interval
-forward_expire: 8h                         # a kpf/Raycast forward unused this long goes away (off: never)
+cluster_browser: kview                     # left pane of the ⇧⌘K layout: kview or k9s
+forward_expire: 8h                         # a kpf/Raycast forward unused this long goes away ("off": never)
+log_links: namespace                       # clickable cluster URLs in logs: namespace (the stream's), all, off
 login_url: https://login.example.com       # page kauth opens (per cluster: clusters[].login)
 notifications: true                        # macOS notifications (fwatch, monitor, Failing Pods)
 ai_command: claude                         # CLI used by kwhy
@@ -73,11 +77,11 @@ Everything outside Rex is optional. How to turn each one on or off:
 | **Claude / Codex** | `kwhy`, `kask` | `kwhy`: `claude-auto`, then `claude`, or `ai_command: <cli>`; `kask`: `claude` or `codex` (`ask_agent`) | `ai_command: off` |
 | **Login page** | `kauth`, picking a logged-out cluster | `login_url` (or `clusters[].login`) | remove `login_url`; `kauth` still accepts a paste |
 | **Flux CLI** (`flux`) | `fdiff` | install it (`brew install fluxcd/tap/flux`) | don't use `fdiff` |
-| **k9s** | `⇧⌘K` layout | install it | without it, the layout shows `kstatus -w` in its place |
+| **k9s** | `⇧⌘K` layout, with `cluster_browser: k9s` (`kview` by default) | install it and set `cluster_browser: k9s` | the default: `kview` (without k9s installed, `cluster_browser: k9s` shows `kstatus -w`) |
 | **Raycast extension** | Open Cluster, Search Pods/Services/Workloads/Flux, the menu bars | `cd raycast && npm install && npm run dev` (from a clone) | Raycast → Extensions → rex8s → Uninstall (or disable single commands there) |
 | **Raycast menu bar** | Flux Status, Failing Pods, Alerts, Kube Context | enable those commands in Raycast | disable them in Raycast settings |
 | **Cluster alerts** | `kstatus`, Alerts menu bar | automatic when an Alertmanager (port 9093) or Prometheus (9090) service runs in the cluster; read through the API server proxy | nothing to turn off: no such service, no Alerts line |
-| **Production guard** | `kubectl`/`helm`/`flux` in panes (and any shell with the PATH) | default: asks at a terminal; without one (agents, scripts) refuses | `REX8S_FORCE=1` per command |
+| **Production guard** | `kubectl`/`helm`/`flux` in panes (and any shell with the PATH), and the rex8s commands that change a cluster | default: asks at a terminal; without one (agents, scripts) refuses; logs each decision in `~/.cache/rex8s/audit.log` | `REX8S_FORCE=1` per command |
 
 `kwhy` and `kask` send the pod's describe output (env values redacted), events
 and logs to the model behind your `claude` (or `codex`) CLI. Logs can still

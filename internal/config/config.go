@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -44,6 +46,9 @@ type Config struct {
 	ProdBackground string `json:"prod_background"`
 	// MonitorInterval is how often the Flux monitor polls, e.g. "2m".
 	MonitorInterval string `json:"monitor_interval"`
+	// ClusterBrowser is the left pane of the ⇧⌘K layout: "kview" (default)
+	// or "k9s".
+	ClusterBrowser string `json:"cluster_browser"`
 	// ForwardExpire: a background port-forward with no connection for this
 	// long goes away by itself, e.g. "8h" (the default); "off" keeps them
 	// until stopped.
@@ -73,6 +78,14 @@ type Config struct {
 	Forwards []Forward `json:"forwards"`
 	// NetDebugImage is the image knet runs in the namespace. Default netshoot.
 	NetDebugImage string `json:"net_debug_image"`
+	// LogLinks: which cluster URLs in logs become clickable: "namespace"
+	// (default: services of the stream's namespace and its pods), "all"
+	// (services of any namespace too) or "off".
+	LogLinks string `json:"log_links"`
+
+	// Warnings: what Load found wrong but could live with (unknown keys,
+	// invalid values that fall back to the default). For the user to see.
+	Warnings []string `json:"-"`
 
 	path string
 }
@@ -105,7 +118,99 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
 	c.path = p
+	c.Warnings = c.check(data)
 	return c, nil
+}
+
+// check returns what is wrong in the file without making it unusable: keys
+// rex8s doesn't know (a typo silently does nothing) and values it ignores.
+func (c *Config) check(data []byte) []string {
+	var w []string
+	var raw map[string]any
+	if yaml.Unmarshal(data, &raw) == nil {
+		w = append(w, unknownKeys("", raw, reflect.TypeOf(Config{}))...)
+		for _, l := range []struct {
+			key string
+			t   reflect.Type
+		}{{"clusters", reflect.TypeOf(Cluster{})}, {"forwards", reflect.TypeOf(Forward{})}} {
+			items, _ := raw[l.key].([]any)
+			for i, it := range items {
+				if m, ok := it.(map[string]any); ok {
+					w = append(w, unknownKeys(fmt.Sprintf("%s[%d].", l.key, i), m, l.t)...)
+				}
+			}
+		}
+	}
+	if err := ValidForwardExpire(c.ForwardExpire); err != nil {
+		w = append(w, err.Error()+"; using 8h")
+	}
+	if v := c.MonitorInterval; v != "" {
+		if d, err := time.ParseDuration(v); err != nil || d <= 0 {
+			w = append(w, fmt.Sprintf("monitor_interval: %q is not a duration like 2m", v))
+		}
+	}
+	oneOf := func(key, v string, ok ...string) {
+		if v == "" {
+			return
+		}
+		for _, o := range ok {
+			if strings.EqualFold(strings.TrimSpace(v), o) {
+				return
+			}
+		}
+		w = append(w, fmt.Sprintf("%s: %q is not one of %s", key, v, strings.Join(ok, ", ")))
+	}
+	oneOf("cluster_browser", c.ClusterBrowser, "kview", "k9s")
+	oneOf("ask_agent", c.AskAgent, "claude", "codex")
+	oneOf("log_links", c.LogLinks, "namespace", "all", "off", "false")
+	for i, f := range c.Forwards {
+		if f.Name == "" || f.Service == "" || f.Port <= 0 {
+			w = append(w, fmt.Sprintf("forwards[%d]: name, service and port are required", i))
+		}
+	}
+	return w
+}
+
+// unknownKeys: the keys of m that no json tag of struct type t names.
+func unknownKeys(prefix string, m map[string]any, t reflect.Type) []string {
+	known := map[string]bool{}
+	for i := 0; i < t.NumField(); i++ {
+		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); name != "" && name != "-" {
+			known[name] = true
+		}
+	}
+	var out []string
+	for k := range m {
+		if !known[k] {
+			out = append(out, fmt.Sprintf("unknown setting %s%s (ignored)", prefix, k))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ValidForwardExpire reports whether v is a forward_expire value rex8s
+// understands: empty, a positive duration (8h, 90m), or off.
+func ValidForwardExpire(v string) error {
+	if _, ok := expiry(v); !ok {
+		return fmt.Errorf("forward_expire: %q is not a duration like 8h, or off", v)
+	}
+	return nil
+}
+
+// expiry parses forward_expire; ok is false for values it doesn't know.
+// YAML reads an unquoted off/no as a boolean, which arrives here as "false".
+func expiry(v string) (d time.Duration, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "":
+		return 8 * time.Hour, true
+	case "off", "0", "never", "false", "no", "none":
+		return 0, true
+	}
+	if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
+		return d, true
+	}
+	return 8 * time.Hour, false
 }
 
 func (c *Config) File() string { return c.path }
@@ -136,21 +241,28 @@ func (c *Config) KubeconfigPath() string {
 	return filepath.Join(home(), ".kube", "config")
 }
 
-// NotificationsOn reports whether macOS notifications are enabled.
-// ForwardExpiry is ForwardExpire as a duration: 8h by default, 0 for "off".
+// UseK9s: the ⇧⌘K layout opens k9s instead of kview.
+func (c *Config) UseK9s() bool { return strings.EqualFold(strings.TrimSpace(c.ClusterBrowser), "k9s") }
+
+// ForwardExpiry is ForwardExpire as a duration: 8h by default (and for
+// values it doesn't understand), 0 for "off".
 func (c *Config) ForwardExpiry() time.Duration {
-	switch strings.TrimSpace(c.ForwardExpire) {
-	case "":
-		return 8 * time.Hour
-	case "off", "0", "never":
-		return 0
-	}
-	if d, err := time.ParseDuration(c.ForwardExpire); err == nil && d > 0 {
-		return d
-	}
-	return 8 * time.Hour
+	d, _ := expiry(c.ForwardExpire)
+	return d
 }
 
+// LogLinksMode is log_links: "namespace" (default), "all" or "off".
+func (c *Config) LogLinksMode() string {
+	switch strings.ToLower(strings.TrimSpace(c.LogLinks)) {
+	case "all":
+		return "all"
+	case "off", "false":
+		return "off"
+	}
+	return "namespace"
+}
+
+// NotificationsOn reports whether macOS notifications are enabled.
 func (c *Config) NotificationsOn() bool { return c.Notifications == nil || *c.Notifications }
 
 // Login returns the login page for the cluster at server, or "".

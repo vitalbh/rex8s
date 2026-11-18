@@ -16,6 +16,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/vitalbh/rex8s/internal/desktop"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
@@ -434,11 +435,9 @@ func (a *app) openChoice(hits []gitHit) error {
 	}
 	switch act.Key {
 	case "web":
-		return exec.Command("open", h.web).Run()
+		return desktop.OpenURL(h.web)
 	case "copy":
-		cmd := exec.Command("pbcopy")
-		cmd.Stdin = strings.NewReader(h.file)
-		return cmd.Run()
+		return desktop.Copy(h.file)
 	}
 	return openInEditor(h.file, h.line)
 }

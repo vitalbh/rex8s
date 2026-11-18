@@ -9,11 +9,6 @@ import (
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
-type clusterPod struct {
-	c kube.Context
-	p pod
-}
-
 // kpods: the pods of every cluster in one picker — per cluster the ones that
 // need attention first, then by namespace and name. `kpods failing` keeps
 // only those (kfail on every cluster); any other word is the initial filter.
@@ -36,36 +31,30 @@ func (a *app) kpods(args []string) error {
 	if err != nil || cp == nil {
 		return err
 	}
-	return a.podAction(cp.c, cl, cp.p, func() {})
+	return a.podAction(cp.C, cl, cp.V, func() {})
 }
 
 // pickPodAll: a pod of any cluster (only the failing ones when failing),
 // with events and last logs in the preview. When filter matches a single
 // pod, that one without asking. Nil when cancelled.
-func (a *app) pickPodAll(what string, failing bool, filter string) (*clusterPod, kube.Client, error) {
+func (a *app) pickPodAll(what string, failing bool, filter string) (*kube.On[kube.Pod], kube.Client, error) {
 	cl, err := a.client(a.src)
 	if err != nil {
 		return nil, cl, err
 	}
-	reads, skipped, err := a.readAllClusters("pods", []string{"get", "pods", "-A", "-o", "json"})
+	res, err := readAll(a, "pods", [][]string{{"get", "pods", "-A", "-o", "json"}},
+		func(_ kube.Context, out [][]byte) ([]kube.Pod, error) {
+			ps, err := kube.ParsePods(out[0])
+			if failing {
+				ps = failingPods(ps)
+			}
+			return ps, err
+		})
 	if err != nil {
 		return nil, cl, err
 	}
-	var all []clusterPod
-	for _, r := range reads {
-		ps, err := parsePods(r.out[0])
-		if err != nil {
-			skipped = append(skipped, r.c.Short+": "+err.Error())
-			continue
-		}
-		if failing {
-			ps = failingPods(ps)
-		}
-		for _, p := range ps {
-			all = append(all, clusterPod{r.c, p})
-		}
-	}
-	printSkipped(skipped)
+	all := res.Rows
+	printSkipped(res.Skipped)
 	if len(all) == 0 {
 		if failing {
 			return nil, cl, fmt.Errorf("no failing pods on any cluster")
@@ -74,21 +63,21 @@ func (a *app) pickPodAll(what string, failing bool, filter string) (*clusterPod,
 	}
 	sort.SliceStable(all, func(i, j int) bool {
 		x, y := all[i], all[j]
-		if x.c.Short != y.c.Short {
-			return x.c.Short < y.c.Short
+		if x.C.Short != y.C.Short {
+			return x.C.Short < y.C.Short
 		}
-		if rx, ry := failRank(x.p), failRank(y.p); rx != ry {
+		if rx, ry := failRank(x.V), failRank(y.V); rx != ry {
 			return rx < ry
 		}
-		if x.p.Namespace != y.p.Namespace {
-			return x.p.Namespace < y.p.Namespace
+		if x.V.Namespace != y.V.Namespace {
+			return x.V.Namespace < y.V.Namespace
 		}
-		return x.p.Name < y.p.Name
+		return x.V.Name < y.V.Name
 	})
 	if filter != "" {
-		var hit []clusterPod
+		var hit []kube.On[kube.Pod]
 		for _, cp := range all {
-			if matchWords(cp.c.Short+" "+cp.p.Namespace+"/"+cp.p.Name, filter) {
+			if matchWords(cp.C.Short+" "+cp.V.Namespace+"/"+cp.V.Name, filter) {
 				hit = append(hit, cp)
 			}
 		}
@@ -99,22 +88,22 @@ func (a *app) pickPodAll(what string, failing bool, filter string) (*clusterPod,
 
 	wc, wn := 0, 0
 	for _, cp := range all {
-		wc = max(wc, len(cp.c.Short))
-		wn = max(wn, len(cp.p.Namespace)+1+len(cp.p.Name))
+		wc = max(wc, len(cp.C.Short))
+		wn = max(wn, len(cp.V.Namespace)+1+len(cp.V.Name))
 	}
 	items := make([]tui.Item, len(all))
 	for i, cp := range all {
 		items[i] = tui.Item{Key: strconv.Itoa(i),
-			Label: fmt.Sprintf("%-*s  %-*s", wc, cp.c.Short, wn, cp.p.Namespace+"/"+cp.p.Name),
-			Hint:  failHint(cp.p), Badge: cp.p.badge()}
+			Label: fmt.Sprintf("%-*s  %-*s", wc, cp.C.Short, wn, cp.V.Namespace+"/"+cp.V.Name),
+			Hint:  failHint(cp.V), Badge: cp.V.Badge()}
 	}
-	at := func(it tui.Item) clusterPod { i, _ := strconv.Atoi(it.Key); return all[i] }
+	at := func(it tui.Item) kube.On[kube.Pod] { i, _ := strconv.Atoi(it.Key); return all[i] }
 	it, err := tui.Run(tui.Options{
-		Title:       clustersTitle(what, len(reads), skipped),
+		Title:       clustersTitle(what, res.OK, len(res.Skipped)),
 		Items:       items,
 		Query:       filter,
-		PreviewHead: func(it tui.Item) string { return failHead(at(it).p) },
-		PreviewBody: func(it tui.Item) string { cp := at(it); return failBody(cl, cp.c.Name, cp.p) },
+		PreviewHead: func(it tui.Item) string { return failHead(at(it).V) },
+		PreviewBody: func(it tui.Item) string { cp := at(it); return failBody(cl, cp.C.Name, cp.V) },
 	})
 	if err != nil || it == nil {
 		return nil, cl, err

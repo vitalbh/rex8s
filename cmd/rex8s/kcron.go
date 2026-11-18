@@ -2,10 +2,8 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/vitalbh/rex8s/internal/kube"
@@ -25,66 +23,36 @@ func (a *app) kcron(args []string) error {
 			filter = arg
 		}
 	}
-	cl, err := a.client(a.src)
+	// each cluster's CronJobs, and its Jobs for how the last runs went
+	type cronSet struct {
+		crons []kube.CronJob
+		jobs  []kube.Job
+	}
+	res, err := readAll(a, "CronJobs", [][]string{{"get", "cronjobs", "-A", "-o", "json"}, {"get", "jobs", "-A", "-o", "json"}},
+		func(_ kube.Context, out [][]byte) ([]cronSet, error) {
+			crons, err := kube.ParseCronJobs(out[0])
+			if err != nil {
+				return nil, err
+			}
+			jobs, _ := kube.ParseJobs(out[1])
+			return []cronSet{{crons, jobs}}, nil
+		})
 	if err != nil {
 		return err
 	}
-	cl.Timeout = 30 * time.Second
-	raw, err := kube.Load(a.src)
-	if err != nil {
-		return err
-	}
-	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
-	fmt.Fprintln(os.Stderr, tui.Dim.Render(fmt.Sprintf("reading CronJobs on %d clusters…", len(clusters))))
-
-	type res struct {
-		c     kube.Context
-		crons []cronJob
-		jobs  []job
-		err   error
-	}
-	results := make([]res, len(clusters))
-	var wg sync.WaitGroup
-	for i, c := range clusters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			r := res{c: c}
-			out, err := cl.Get(c.Name, "get", "cronjobs", "-A", "-o", "json")
-			if err == nil {
-				r.crons, err = parseCronJobs(out)
-			}
-			if jout, jerr := cl.Get(c.Name, "get", "jobs", "-A", "-o", "json"); jerr == nil {
-				r.jobs, _ = parseJobs(jout)
-			}
-			r.err = err
-			results[i] = r
-		}()
-	}
-	wg.Wait()
-	fmt.Fprint(os.Stderr, "\033[1A\033[2K")
 
 	now := time.Now()
 	type run struct {
 		at    time.Time
 		c     kube.Context
-		cj    cronJob
+		cj    kube.CronJob
 		state string
 	}
 	var runs []run
-	var skipped []string
 	suspended, bad := 0, 0
 	f := strings.ToLower(filter)
-	for _, r := range results {
-		if r.err != nil {
-			why := lastLogLine(r.err.Error())
-			if kube.AuthExpired(r.err) {
-				why = "login expired (kauth " + r.c.Short + ")"
-			}
-			skipped = append(skipped, r.c.Short+": skipped, "+why)
-			continue
-		}
-		for _, cj := range r.crons {
+	for _, r := range res.Rows {
+		for _, cj := range r.V.crons {
 			if f != "" && !strings.Contains(strings.ToLower(cj.Namespace+"/"+cj.Name), f) {
 				continue
 			}
@@ -97,9 +65,9 @@ func (a *app) kcron(args []string) error {
 				bad++
 				continue
 			}
-			state := cronState(cj, r.jobs)
+			state := cronState(cj, r.V.jobs)
 			for _, t := range spec.runs(now, now.Add(window), 500) {
-				runs = append(runs, run{t, r.c, cj, state})
+				runs = append(runs, run{t, r.C, cj, state})
 			}
 		}
 	}
@@ -168,9 +136,6 @@ func (a *app) kcron(args []string) error {
 	}
 	b.WriteString("\n" + tui.Dim.Render(summary) + "\n")
 	fmt.Print(b.String())
-	sort.Strings(skipped)
-	for _, s := range skipped {
-		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
-	}
+	printSkipped(res.Skipped)
 	return nil
 }

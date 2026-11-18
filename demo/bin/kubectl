@@ -231,7 +231,8 @@ def workloads(ctx):
             updated, available = step, (replicas if step >= replicas else max(step - 1, 0))
         d = {"apiVersion": "apps/v1", "kind": kind,
              "metadata": {"name": name, "namespace": ns, "generation": gen, "labels": dict(labels, app=base),
-                          "uid": "demo-" + name, "resourceVersion": str(1000 + gen)},
+                          "uid": "demo-" + name, "resourceVersion": str(1000 + gen),
+                          "creationTimestamp": ts((40 + gen * 9) * 86400)},
              "spec": {"replicas": replicas, "selector": {"matchLabels": {"app": name}},
                       "template": {"metadata": {"labels": {"app": base}, "annotations": tpl_ann},
                                    "spec": {"containers": [{"name": base, "image": image,
@@ -288,7 +289,9 @@ def pod(ns, name, phase="Running", ready=(1, 1), restarts=0, waiting=None, age_h
     st = {"phase": phase, "containerStatuses": statuses}
     if reason:
         st["reason"] = reason
-    return {"metadata": {"name": name, "namespace": ns, "creationTimestamp": created},
+    # app: the owner's name (the Deployment/StatefulSet selector), as kview's "enter: pods" matches it
+    app = re.sub(r"(-[a-z0-9]{8,10}-[a-z0-9]{5}|-[0-9]+|-[a-z0-9]{5})$", "", name)
+    return {"metadata": {"name": name, "namespace": ns, "creationTimestamp": created, "labels": {"app": app}},
             "spec": {"containers": specs}, "status": st}
 
 
@@ -336,6 +339,7 @@ def services(ns):
         return {"metadata": {"name": name, "namespace": n}, "spec": {"type": t, "ports": [
             {"name": pn, "port": pp, "protocol": "TCP"} for pn, pp in ports]}}
     all_svcs = [svc("api", "api", [("http", 8080), ("grpc", 9090)]), svc("api", "redis", [("redis", 6379)]),
+                svc("api", "orders-db", [("postgres", 5432)]),
                 svc("web", "web", [("http", 80)]), svc("search", "search", [("http", 9200)]),
                 svc("payments", "payments-api", [("http", 8080)]),
                 svc("monitoring", "prometheus", [("web", 9090)]),

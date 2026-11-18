@@ -68,7 +68,7 @@ func (a *app) kfail(args []string) error {
 		scope, where = []string{"-n", ns}, c.Short+"/"+ns
 	}
 
-	pods := map[string]pod{}
+	pods := map[string]kube.Pod{}
 	it, err := tui.Run(tui.Options{
 		Title: "Failing pods on " + where,
 		Query: filter,
@@ -77,7 +77,7 @@ func (a *app) kfail(args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			ps, err := parsePods(out)
+			ps, err := kube.ParsePods(out)
 			if err != nil {
 				return nil, err
 			}
@@ -108,7 +108,7 @@ func (a *app) kfail(args []string) error {
 
 // podAction: what to do with a pod — logs / why / ask / shell / describe /
 // events (kfail, kpods). pause runs after output that would scroll away.
-func (a *app) podAction(c kube.Context, cl kube.Client, p pod, pause func()) error {
+func (a *app) podAction(c kube.Context, cl kube.Client, p kube.Pod, pause func()) error {
 	actions := []tui.Item{
 		{Key: "logs", Label: fmt.Sprintf("%-9s", "logs"), Hint: "follow the logs in a split"},
 		{Key: "why", Label: fmt.Sprintf("%-9s", "why"), Hint: "ask Claude why it is unhealthy (kwhy)"},
@@ -176,8 +176,8 @@ func (a *app) podAction(c kube.Context, cl kube.Client, p pod, pause func()) err
 
 // failingPods keeps the pods that need attention, worst first: failing,
 // then not ready, then running but restarted because they were killed.
-func failingPods(ps []pod) []pod {
-	var out []pod
+func failingPods(ps []kube.Pod) []kube.Pod {
+	var out []kube.Pod
 	for _, p := range ps {
 		if failRank(p) < 3 {
 			out = append(out, p)
@@ -192,8 +192,8 @@ func failingPods(ps []pod) []pod {
 	return out
 }
 
-func failRank(p pod) int {
-	switch p.badge() {
+func failRank(p kube.Pod) int {
+	switch p.Badge() {
 	case "FAIL":
 		return 0
 	case "WAIT":
@@ -206,29 +206,29 @@ func failRank(p pod) int {
 	return 3
 }
 
-func failBadge(p pod) string {
-	if b := p.badge(); b != "ok" {
+func failBadge(p kube.Pod) string {
+	if b := p.Badge(); b != "ok" {
 		return b
 	}
 	return "WAIT"
 }
 
-func failHint(p pod) string {
-	h := fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.status(), p.Ready, p.Total, p.Restarts, age(p.Created))
-	if p.LastReason != "" && p.LastReason != p.status() {
+func failHint(p kube.Pod) string {
+	h := fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.Status(), p.Ready, p.Total, p.Restarts, kube.Age(p.Created))
+	if p.LastReason != "" && p.LastReason != p.Status() {
 		h += "  last: " + p.LastReason
 	}
 	return h
 }
 
-func failHead(p pod) string {
+func failHead(p kube.Pod) string {
 	lines := []string{
-		tui.Bold.Render(p.Name) + "  " + tui.Warn.Render(p.status()),
+		tui.Bold.Render(p.Name) + "  " + tui.Warn.Render(p.Status()),
 		"",
 		tui.Dim.Render("namespace ") + p.Namespace,
 		tui.Dim.Render("ready     ") + fmt.Sprintf("%d/%d", p.Ready, p.Total),
 		tui.Dim.Render("restarts  ") + fmt.Sprint(p.Restarts),
-		tui.Dim.Render("age       ") + age(p.Created),
+		tui.Dim.Render("age       ") + kube.Age(p.Created),
 	}
 	if p.LastReason != "" {
 		lines = append(lines, tui.Dim.Render("last exit ")+p.LastReason)
@@ -238,7 +238,7 @@ func failHead(p pod) string {
 
 // failBody: the pod's last events, then its last log lines. When it restarted,
 // the previous container's logs come first: that is where the crash is.
-func failBody(cl kube.Client, ctxName string, p pod) string {
+func failBody(cl kube.Client, ctxName string, p kube.Pod) string {
 	parts := []string{objectEvents(cl, ctxName, p.Namespace, "Pod", p.Name, 4)}
 	logArgs := []string{"logs", "-n", p.Namespace, p.Name, fmt.Sprintf("--tail=%d", failLogLines)}
 	if len(p.Containers) > 1 {

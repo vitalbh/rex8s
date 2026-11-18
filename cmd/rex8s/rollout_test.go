@@ -9,7 +9,7 @@ import (
 
 func dep(name string, gen, obs int64, desired, updated, ready int) kube.Workload {
 	return kube.Workload{Kind: "Deployment", Namespace: "app", Name: name, Generation: gen, Observed: obs,
-		Desired: desired, Updated: updated, Ready: ready, KsName: "apps", KsNamespace: "flux-system"}
+		Desired: desired, Updated: updated, Available: ready, KsName: "apps", KsNamespace: "flux-system"}
 }
 
 func TestEvaluateRollout(t *testing.T) {
@@ -50,7 +50,7 @@ func TestStreamWarningsDedup(t *testing.T) {
 	ev := `{"metadata":{"uid":"u1","namespace":"app"},"involvedObject":{"kind":"Pod","name":"api-1"},"reason":"BackOff","message":"Back-off restarting failed container","count":5,"lastTimestamp":"2026-11-04T10:00:00Z"}`
 	ev2 := `{"metadata":{"uid":"u2","namespace":"app"},"involvedObject":{"kind":"Pod","name":"api-2"},"reason":"Unhealthy","message":"Readiness probe failed","count":1,"lastTimestamp":"2026-11-04T10:00:01Z"}`
 	var out strings.Builder
-	streamWarnings(strings.NewReader(ev+"\n"+ev+"\n"+ev2+"\n"), &out, true)
+	streamWarnings(strings.NewReader(ev+"\n"+ev+"\n"+ev2+"\n"), &out, true, nil)
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 2 || !strings.Contains(lines[0], "app pod/api-1") || !strings.Contains(lines[0], "x5") {
 		t.Fatalf("got:\n%s", out.String())

@@ -9,7 +9,7 @@ cd raycast && npm install && npm run dev   # imports it into Raycast
 
 ## Commands
 
-- **Open Cluster** — open a shell or the k9s layout (⌘L), optionally picking a
+- **Open Cluster** — open a shell or the ⇧⌘K layout — `kview` · shell · warnings (⌘L), optionally picking a
   namespace (⌘N).
 - **Search Pods** — every pod of a cluster (crashing first): follow logs,
   explain with Claude (⌘E), talk to Claude about it (⌘⇧E, `kask`), shell into

@@ -1,4 +1,4 @@
-# kwarn: only Warning events, live
+# kwarn -A: the Warning events of every cluster, live, in one stream
 Output docs/kwarn.gif
 Set Shell "bash"
 Set FontSize 15
@@ -12,7 +12,7 @@ Type "export PS1='demo $ ' && clear"
 Enter
 Sleep 300ms
 Show
-Type "kwarn"
+Type "kwarn -A"
 Enter
 Sleep 14s
 Ctrl+C

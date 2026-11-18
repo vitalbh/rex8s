@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
@@ -57,11 +58,11 @@ func (a *app) kmulti(args []string) error {
 	if err != nil {
 		return err
 	}
-	all := uniqueClusters(kube.Contexts(raw, a.cfg))
+	all := fleet.All(raw, a.cfg)
 	var chosen []kube.Context
 	if group != "" {
 		for _, short := range a.cfg.Groups[group] {
-			c, err := a.clusterContext(short)
+			c, err := a.context(short)
 			if err != nil {
 				return fmt.Errorf("group %s: %v", group, err)
 			}

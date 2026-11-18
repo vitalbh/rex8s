@@ -55,45 +55,6 @@ func TestDiffKeys(t *testing.T) {
 	}
 }
 
-func TestDedupeByServer(t *testing.T) {
-	out := dedupe([]kube.Context{{Name: "a", Server: "s1"}, {Name: "a-alias", Server: "s1"}, {Name: "b", Server: "s2"}})
-	if len(out) != 2 || out[0].Name != "a" || out[1].Name != "b" {
-		t.Fatalf("%+v", out)
-	}
-}
-
-func TestPodBadge(t *testing.T) {
-	ps, err := parsePods([]byte(`{"items":[
-	 {"metadata":{"name":"ok"},"spec":{"containers":[{"name":"app"}]},"status":{"phase":"Running","containerStatuses":[{"ready":true}]}},
-	 {"metadata":{"name":"crash"},"spec":{"containers":[{"name":"app"}]},"status":{"phase":"Running","containerStatuses":[{"ready":false,"restartCount":7,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}
-	]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ps[0].badge() != "ok" || ps[1].badge() != "FAIL" || ps[1].Restarts != 7 || ps[1].status() != "CrashLoopBackOff" {
-		t.Fatalf("%+v", ps)
-	}
-}
-
-func TestParseServicesTCPOnly(t *testing.T) {
-	ss, err := parseServices([]byte(`{"items":[
-	 {"metadata":{"name":"web"},"spec":{"type":"ClusterIP","ports":[{"name":"http","port":80},{"name":"dns","port":53,"protocol":"UDP"}]}},
-	 {"metadata":{"name":"udp-only"},"spec":{"ports":[{"port":53,"protocol":"UDP"}]}}
-	]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ss) != 1 || len(ss[0].Ports) != 1 || ss[0].Ports[0].Port != 80 || ss[0].portsText() != "80/http" {
-		t.Fatalf("%+v", ss)
-	}
-}
-
-func TestFreePort(t *testing.T) {
-	if p := freePort(0); p <= 0 {
-		t.Fatalf("freePort(0) = %d", p)
-	}
-}
-
 func TestShellSplit(t *testing.T) {
 	got, err := shellSplit(`kubectl config set-credentials "my user" --auth-provider-arg='id-token=a b' --x=c\ d`)
 	if err != nil {

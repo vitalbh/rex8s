@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
@@ -36,24 +38,25 @@ func (a *app) kroll(args []string) error {
 			if err != nil {
 				return err
 			}
-			given = append(given, target{c: c, Kind: p[1], Namespace: p[2], Name: p[3]})
+			given = append(given, target{c: c, Workload: kube.Workload{Kind: p[1], Namespace: p[2], Name: p[3]}})
 			continue
 		}
 		filter = args[i]
 	}
-	k, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
+	cl.Timeout = 30 * time.Second
 	targets := given
 	if len(targets) == 0 {
 		raw, err := kube.Load(a.src)
 		if err != nil {
 			return err
 		}
-		clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
+		clusters := fleet.All(raw, a.cfg)
 		var skipped []string
-		targets, _, err = a.pickTargets(k, clusters, filter, "Restart which workloads?", &skipped)
+		targets, _, err = a.pickTargets(cl, clusters, filter, "Restart which workloads?", &skipped)
 		for _, s := range skipped {
 			fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
 		}
@@ -70,18 +73,22 @@ func (a *app) kroll(args []string) error {
 		}
 		fmt.Printf("  %-10s %s %s/%s%s\n", t.c.Short, kube.ShortKind(t.Kind), t.Namespace, t.Name, tag)
 	}
-	if prod := prodClusters(targets); len(prod) > 0 && os.Getenv("REX8S_FORCE") == "" &&
-		!confirmProd(fmt.Sprintf("Restart %d workload(s) on", len(targets)), prod) {
-		fmt.Fprintln(os.Stderr, "cancelled.")
-		return nil
+	touched := make([]kube.Context, 0, len(targets))
+	for _, t := range targets {
+		touched = append(touched, t.c)
+	}
+	if ok, err := confirmChange(touched, fmt.Sprintf("kroll: rollout restart %d workload(s)", len(targets))); !ok {
+		return err
 	}
 	fmt.Println()
 
 	states := make([]rollState, len(targets))
 	for i, t := range targets {
 		states[i] = rollState{t: t, start: time.Now()}
-		if _, err := kubectlOut(k, a.src, 30*time.Second, "--context", t.c.Name, "-n", t.Namespace,
-			"rollout", "restart", strings.ToLower(t.Kind)+"/"+t.Name); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err := cl.Output(ctx, t.c.Name, "-n", t.Namespace, "rollout", "restart", strings.ToLower(t.Kind)+"/"+t.Name)
+		cancel()
+		if err != nil {
 			states[i].err = lastLogLine(err.Error())
 			states[i].end = time.Now()
 		}
@@ -110,7 +117,7 @@ func (a *app) kroll(args []string) error {
 			wg.Add(1)
 			go func(s *rollState) {
 				defer wg.Done()
-				s.poll(k, a.src)
+				s.poll(cl)
 			}(&states[i])
 		}
 		wg.Wait()
@@ -158,12 +165,12 @@ type rollState struct {
 
 func (s *rollState) finished() bool { return !s.end.IsZero() }
 
-func (s *rollState) poll(k, kubeconfig string) {
-	out, err := kubectlOut(k, kubeconfig, 20*time.Second, "--context", s.t.c.Name, "-n", s.t.Namespace,
-		"get", strings.ToLower(s.t.Kind), s.t.Name, "-o", "json")
+func (s *rollState) poll(cl kube.Client) {
+	cl.Timeout = 20 * time.Second
+	out, err := cl.Get(s.t.c.Name, "-n", s.t.Namespace, "get", strings.ToLower(s.t.Kind), s.t.Name, "-o", "json")
 	if err == nil {
 		var ws []kube.Workload
-		if ws, err = kube.ParseWorkloads([]byte(`{"items":[` + out + `]}`)); err == nil && len(ws) == 1 {
+		if ws, err = kube.ParseWorkloads([]byte(`{"items":[` + string(out) + `]}`)); err == nil && len(ws) == 1 {
 			s.w, s.seen = ws[0], true
 		}
 	}
@@ -184,10 +191,10 @@ func (s *rollState) line() string {
 	case s.err != "":
 		return tui.Err.Render("  ✗ ") + name + "  " + tui.Err.Render(s.err)
 	case s.finished():
-		return tui.Ok.Render("  ✓ ") + name + "  " + tui.Ok.Render(fmt.Sprintf("%d/%d ready", s.w.Ready, s.w.Desired)) + took()
+		return tui.Ok.Render("  ✓ ") + name + "  " + tui.Ok.Render(fmt.Sprintf("%d/%d ready", s.w.Available, s.w.Desired)) + took()
 	case !s.seen:
 		return tui.Dim.Render("  … ") + name
 	}
 	return tui.Warn.Render("  ⟳ ") + name + "  " +
-		fmt.Sprintf("%d/%d updated · %d ready", s.w.Updated, s.w.Desired, s.w.Ready)
+		fmt.Sprintf("%d/%d updated · %d ready", s.w.Updated, s.w.Desired, s.w.Available)
 }

@@ -24,6 +24,7 @@ var helpEntries = []helpEntry{
 	{"pane", "rex8s doctor", "rex8s doctor · setup · config · agents", "check and set up rex8s", []string{"doctor: checks the install, Rex, kubectl/flux/k9s/claude and the config.", "setup: (re)installs into Rex. config: settings. agents install: the skill for coding agents."}},
 	{"pane", "ktint", "ktint [#hex|off] [--save]", "background color of production panes", []string{"No argument: presets, previewed live; enter saves to config.yaml.", "ktint #1f1430 tries a color in this pane; --save keeps it; ktint reset undoes."}},
 	{"pods", "knet", "knet", "network toolbox pod (netshoot) in this namespace", []string{"curl, dig, nc, tcpdump… from inside the cluster. Production asks first; the pod is removed on exit."}},
+	{"pods", "kview", "kview [-A] [pods|workloads|services|jobs|nodes|warnings]", "browse the cluster like k9s: tabs, live lists, keys", []string{"tab or 1-6 switch, / filters, letters act: l logs, s shell, d describe, y yaml, r restart…", "-A: every cluster, each as it answers; R retries skipped ones. Changes ask y/N naming the object; production asks again."}},
 	{"pods", "kpods", "kpods [failing] [FILTER]", "the pods of every cluster in one picker", []string{"Per cluster the ones that need attention first. failing: only those (kfail on every cluster).", "Preview: events and last logs. Enter: logs, why, ask, shell, describe, events."}},
 	{"pods", "kfail", "kfail [-n|-A] [FILTER]", "failing pods with events and last logs", []string{"All namespaces (-n: this one; -A: every cluster). Enter: logs, why, ask (kask), shell, describe, events."}},
 	{"pods", "klogs", "klogs [-A] [-g RE] [-s DUR] [FILTER]", "follow a workload's or a pod's logs in a split", []string{"Workloads first: all their pods merged; new pods join after a rollout.", "klogs -A: workloads and pods of every cluster; mark several, one stream.", "-g REGEX keeps matching lines (highlighted); -s 1h starts an hour back.", "Cluster URLs (x.ns.svc…, a pod's http://0.0.0.0:PORT) are clickable: they port-forward on click."}},
@@ -58,7 +59,8 @@ var helpEntries = []helpEntry{
 
 var helpKeys = []struct{ keys, what string }{
 	{"⇧⌘J", "new tab: pick a cluster → isolated shell"},
-	{"⇧⌘K", "new tab: pick a cluster → k9s · shell · warnings"},
+	{"⇧⌘K", "new tab: pick a cluster → kview · shell · warnings"},
+	{"⇧⌘V", "new tab: kview on every cluster"},
 	{"⇧⌘M", "new tab: pick clusters → one pane each, side by side"},
 	{"⌘⇧P", "palette: Kubernetes: Flux Monitor, Restore Cluster Tabs"},
 }

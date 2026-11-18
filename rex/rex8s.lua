@@ -12,7 +12,7 @@ local function check(r, err) if err ~= nil then error(err, 0) end; return r end
 local function opened(w, err) w = check(w, err); return { window_id = w and w.window_id } end
 local function with_ns(argv, ns) if ns and ns ~= "" then argv[#argv + 1] = ns end; return argv end
 
--- new tab with the cluster picker; the tab becomes the cluster (or the k9s
+-- new tab with the cluster picker; the tab becomes the cluster (or the kview
 -- layout), or closes on esc
 local function picker(mode)
   return function(ctx, args)
@@ -41,7 +41,7 @@ rex.action{
 rex.action{ name = "k8s_pick", title = "Kubernetes: Open Cluster Shell…",  category = "Kubernetes",
             keywords = "k8s kubectl cluster context", run = picker("tab") }
 rex.action{ name = "k8s_pick_layout", title = "Kubernetes: Open Cluster Layout…", category = "Kubernetes",
-            keywords = "k8s k9s cluster layout", run = picker("layout") }
+            keywords = "k8s k9s kview cluster layout", run = picker("layout") }
 
 -- new tab: isolated shell on the cluster
 rex.action{
@@ -52,14 +52,15 @@ rex.action{
   end,
 }
 
--- new tab: k9s on the left | shell on top + Warning events below on the right
+-- new tab: kview (or k9s, cluster_browser) on the left | shell on top +
+-- Warning events below on the right
 rex.action{
   name = "k8s_layout", title = "Kubernetes: Cluster Layout (ctx)", category = "Kubernetes",
   args = { ctx = "string", ns = "string?" },
   run  = function(ctx, args)
     return opened(rex.session.new_window{
       layout = rex.layout.horizontal(0.6,
-        term(with_ns({ K8S, "k9s", args.ctx }, args.ns), "k9s"),
+        term(with_ns({ K8S, "browser", args.ctx }, args.ns), "kview"),
         rex.layout.vertical(0.65,
           term(with_ns({ K8S, "pane", "--layout", args.ctx }, args.ns), "k8s"),
           term(with_ns({ K8S, "warnings", args.ctx }, args.ns), "warnings"))),
@@ -293,6 +294,14 @@ rex.action{ name = "k8s_flux_monitor", title = "Kubernetes: Flux Monitor", categ
               return opened(rex.session.new_window{ layout = term({ K8S, "monitor" }, "flux monitor") })
             end }
 
+-- new tab: kview on every cluster (k9s-like browser), no picker
+rex.action{ name = "k8s_view_all", title = "Kubernetes: All Clusters (kview)", category = "Kubernetes",
+            keywords = "k8s kview k9s browse pods workloads every cluster",
+            run = function(ctx, args)
+              return opened(rex.session.new_window{ layout = term({ K8S, "kview", "-A" }, "kview") })
+            end }
+
 rex.bind("shift+cmd+j", "k8s_pick")
 rex.bind("shift+cmd+k", "k8s_pick_layout")
 rex.bind("shift+cmd+m", "k8s_multi_pick")
+rex.bind("shift+cmd+v", "k8s_view_all")

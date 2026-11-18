@@ -56,9 +56,11 @@ rex8s demo off
 demo/record.sh                        # re-record docs/*.gif with VHS (demo mode only for the recording)
 ```
 
-`docs/kmulti.gif` and `docs/tour.gif` are screen recordings of the real app,
-driven by `demo/kmulti-scene.sh` and `demo/tour-scene.sh` (demo mode on,
-Remote Control on).
+`docs/kmulti.gif`, `docs/tour.gif` and `docs/kview-rex.gif` are screen
+recordings of the real app, driven by `demo/kmulti-scene.sh`,
+`demo/tour-scene.sh` and `demo/kview-scene.sh` (demo mode on, Remote Control
+on). `kview-scene.sh` opens its own window without the sidebar, waits while you
+resize it and start recording, then plays.
 
 ## Known limitations
 

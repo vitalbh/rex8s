@@ -19,6 +19,10 @@ type Item struct {
 	Hint  string // gray text on the right, also filterable
 	Badge string // "PROD", "dev" or ""
 	Dim   bool   // special option (e.g. "context default")
+	// Name is what the row is, for prompts: "pod default/web-7d9f on use
+	// (PROD)". The browser asks "delete <Name>?" before a Confirm action;
+	// without it, it falls back to the label.
+	Name string
 }
 
 // Options configures a picker.

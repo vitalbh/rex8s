@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 	"sigs.k8s.io/yaml"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
@@ -28,17 +29,18 @@ func (a *app) kdiff(args []string) error {
 	if len(args) > 0 {
 		filter = args[0]
 	}
-	k, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
+	cl.Timeout = 30 * time.Second
 	raw, err := kube.Load(a.src)
 	if err != nil {
 		return err
 	}
-	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 	var skipped []string
-	chosen, all, err := a.pickTargets(k, clusters, filter, "Compare which workloads? (space marks two)", &skipped)
+	chosen, all, err := a.pickTargets(cl, clusters, filter, "Compare which workloads? (space marks two)", &skipped)
 	for _, s := range skipped {
 		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
 	}
@@ -79,11 +81,11 @@ func (a *app) kdiff(args []string) error {
 		return fmt.Errorf("mark two workloads to compare (%d marked)", len(chosen))
 	}
 
-	ly, err := specYAML(k, a.src, left)
+	ly, err := specYAML(cl, left)
 	if err != nil {
 		return err
 	}
-	ry, err := specYAML(k, a.src, right)
+	ry, err := specYAML(cl, right)
 	if err != nil {
 		return err
 	}
@@ -102,13 +104,12 @@ func label(t target) string {
 	return fmt.Sprintf("%s %s %s/%s", t.c.Short, kube.ShortKind(t.Kind), t.Namespace, t.Name)
 }
 
-func specYAML(k, kubeconfig string, t target) ([]byte, error) {
-	out, err := kubectlOut(k, kubeconfig, 30*time.Second, "--context", t.c.Name, "-n", t.Namespace,
-		"get", strings.ToLower(t.Kind), t.Name, "-o", "json")
+func specYAML(cl kube.Client, t target) ([]byte, error) {
+	out, err := cl.Get(t.c.Name, "-n", t.Namespace, "get", strings.ToLower(t.Kind), t.Name, "-o", "json")
 	if err != nil {
 		return nil, fmt.Errorf("%s: %v", label(t), lastLogLine(err.Error()))
 	}
-	return cleanSpec([]byte(out))
+	return cleanSpec(out)
 }
 
 // cleanSpec drops what differs on every cluster without meaning anything:

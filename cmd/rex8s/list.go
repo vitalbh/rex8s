@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
+	"github.com/vitalbh/rex8s/internal/forward"
 	"github.com/vitalbh/rex8s/internal/kube"
 )
 
@@ -94,13 +96,13 @@ func (a *app) listData(args []string) (any, error) {
 	}
 	if args[0] == "pf" { // with the URL and whether a browser opens it
 		type pfJSON struct {
-			pfEntry
+			forward.Entry
 			URL string `json:"url"`
 			Web bool   `json:"web"`
 		}
 		out := []pfJSON{}
 		for _, e := range a.pfList() {
-			out = append(out, pfJSON{e, e.URL(), e.Kind == "" || e.Kind.web()})
+			out = append(out, pfJSON{e, e.URL(), e.Kind == "" || e.Kind.Web()})
 		}
 		return out, nil
 	}
@@ -167,16 +169,16 @@ func (a *app) listData(args []string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		ps, err := parsePods(data)
+		ps, err := kube.ParsePods(data)
 		if err != nil {
 			return nil, err
 		}
 		rank := map[string]int{"FAIL": 0, "WAIT": 1, "ok": 2, "done": 3}
-		sort.SliceStable(ps, func(i, j int) bool { return rank[ps[i].badge()] < rank[ps[j].badge()] })
+		sort.SliceStable(ps, func(i, j int) bool { return rank[ps[i].Badge()] < rank[ps[j].Badge()] })
 		out := make([]podJSON, 0, len(ps))
 		for _, p := range ps {
-			out = append(out, podJSON{Namespace: p.Namespace, Name: p.Name, Status: p.status(), Badge: p.badge(),
-				Ready: p.Ready, Total: p.Total, Restarts: p.Restarts, Age: age(p.Created), Containers: p.Containers})
+			out = append(out, podJSON{Namespace: p.Namespace, Name: p.Name, Status: p.Status(), Badge: p.Badge(),
+				Ready: p.Ready, Total: p.Total, Restarts: p.Restarts, Age: kube.Age(p.Created), Containers: p.Containers})
 		}
 		return out, nil
 	case "services":
@@ -184,7 +186,7 @@ func (a *app) listData(args []string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		ss, err := parseServices(data)
+		ss, err := kube.ParseServices(data)
 		if err != nil {
 			return nil, err
 		}
@@ -249,18 +251,18 @@ func (a *app) fluxHealthAll() ([]clusterHealthJSON, error) {
 	if err != nil {
 		return nil, err
 	}
-	clusters := dedupe(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 	cl, err := a.client(a.src)
 	if err != nil {
 		return nil, err
 	}
-	health := pollAll(cl, clusters)
+	health := pollAll(a.readerFor(cl), clusters)
 	out := make([]clusterHealthJSON, 0, len(clusters))
 	for _, c := range clusters {
 		h := health[c.Name]
 		j := clusterHealthJSON{Context: c.Name, Short: c.Short, Prod: c.Prod, Installed: h.installed, Problems: []fluxJSON{}}
 		if h.err != "" {
-			j.Error, j.LoginExpired = h.err, kube.AuthExpired(errors.New(h.err))
+			j.Error, j.LoginExpired = h.err, h.expired
 		}
 		st := kube.Summarize(h.items)
 		j.Ready, j.Failing, j.Reconciling, j.Suspended = st.Ready, st.Failing, st.Progressing, st.Suspended
@@ -297,14 +299,11 @@ func (a *app) useContext(name string) error {
 	if _, err := a.context(name); err != nil {
 		return err
 	}
-	k, err := a.kubectl()
+	cl, err := a.client(a.src) // the master, which may be a list (a:b)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(k, "config", "use-context", name)
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src) // the master may be a list (a:b)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	return cmd.Run()
+	return cl.Run("", "config", "use-context", name)
 }
 
 type clusterFailingJSON struct {
@@ -324,7 +323,7 @@ func (a *app) failingAll() ([]clusterFailingJSON, error) {
 	if err != nil {
 		return nil, err
 	}
-	clusters := dedupe(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 	cl, err := a.client(a.src)
 	if err != nil {
 		return nil, err
@@ -337,9 +336,9 @@ func (a *app) failingAll() ([]clusterFailingJSON, error) {
 			defer wg.Done()
 			j := clusterFailingJSON{Context: c.Name, Short: c.Short, Prod: c.Prod, Pods: []podJSON{}}
 			data, err := cl.Get(c.Name, "get", "pods", "-A", "-o", "json")
-			var ps []pod
+			var ps []kube.Pod
 			if err == nil {
-				ps, err = parsePods(data)
+				ps, err = kube.ParsePods(data)
 			}
 			if err != nil {
 				j.Error, j.LoginExpired = lastLogLine(err.Error()), kube.AuthExpired(err)
@@ -348,8 +347,8 @@ func (a *app) failingAll() ([]clusterFailingJSON, error) {
 				if !brokenLive(p) {
 					continue
 				}
-				j.Pods = append(j.Pods, podJSON{Namespace: p.Namespace, Name: p.Name, Status: p.status(), Badge: failBadge(p),
-					Ready: p.Ready, Total: p.Total, Restarts: p.Restarts, Age: age(p.Created), Containers: p.Containers})
+				j.Pods = append(j.Pods, podJSON{Namespace: p.Namespace, Name: p.Name, Status: p.Status(), Badge: failBadge(p),
+					Ready: p.Ready, Total: p.Total, Restarts: p.Restarts, Age: kube.Age(p.Created), Containers: p.Containers})
 			}
 			out[i] = j
 		}()
@@ -358,8 +357,8 @@ func (a *app) failingAll() ([]clusterFailingJSON, error) {
 	return out, nil
 }
 
-func brokenLive(p pod) bool {
-	return p.badge() == "FAIL" && p.Phase != "Failed" && p.Phase != "Succeeded"
+func brokenLive(p kube.Pod) bool {
+	return p.Badge() == "FAIL" && p.Phase != "Failed" && p.Phase != "Succeeded"
 }
 
 type workloadJSON struct {
@@ -377,15 +376,16 @@ type workloadJSON struct {
 }
 
 func (a *app) workloadsJSON() ([]workloadJSON, error) {
-	k, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return nil, err
 	}
+	cl.Timeout = 30 * time.Second
 	raw, err := kube.Load(a.src)
 	if err != nil {
 		return nil, err
 	}
-	ws, _ := a.findWorkloads(k, uniqueClusters(kube.Contexts(raw, a.cfg)), "")
+	ws, _ := a.findWorkloads(cl, fleet.All(raw, a.cfg), "")
 	out := make([]workloadJSON, 0, len(ws))
 	for _, t := range ws {
 		img := mainImage(t)

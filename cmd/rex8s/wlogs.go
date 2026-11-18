@@ -2,39 +2,35 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-
 	"github.com/vitalbh/rex8s/internal/kube"
+	"github.com/vitalbh/rex8s/internal/logstream"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
-// logSpec is one workload's pods to follow: "ctx|ns|selector|label".
+// logSpec is one workload's pods to follow: "ctx|ns|selector|label"; its
+// text form is a logstream.Spec's, which the log pane reads.
 type logSpec struct{ ctx, ns, selector, label string }
 
 func (s logSpec) String() string {
-	return strings.Join([]string{s.ctx, s.ns, s.selector, s.label}, "|")
+	return logstream.Spec{Ctx: s.ctx, NS: s.ns, Selector: s.selector, Label: s.label}.String()
 }
 
-func parseLogSpec(s string) (logSpec, bool) {
-	p := strings.SplitN(s, "|", 4)
-	if len(p) != 4 || p[0] == "" || p[2] == "" {
-		return logSpec{}, false
-	}
-	return logSpec{p[0], p[1], p[2], p[3]}, true
-}
+// logOpts: klogs -g / -s.
+type logOpts = logstream.Opts
+
+// podSelector marks a logSpec that follows one pod instead of a workload.
+const podSelector = logstream.PodSelector
 
 // klogs: pick a workload (all its pods) or a single pod in this namespace and
 // follow the logs in a split. klogs -A: workloads on any cluster (mark
@@ -89,16 +85,16 @@ func (a *app) klogsWith(args []string, ask bool) error {
 		case arg == "-A":
 			all = true
 		case (arg == "-g" || arg == "--grep") && i+1 < len(args):
-			lo.grep = args[i+1]
+			lo.Grep = args[i+1]
 			i++
 		case (arg == "-s" || arg == "--since") && i+1 < len(args):
-			lo.since = args[i+1]
+			lo.Since = args[i+1]
 			i++
 		default:
 			filter = arg
 		}
 	}
-	if _, err := lo.compile(); err != nil {
+	if _, err := lo.Compile(); err != nil {
 		return err
 	}
 	if all {
@@ -117,7 +113,7 @@ func (a *app) klogsWith(args []string, ask bool) error {
 	if err != nil {
 		return err
 	}
-	pods := map[string]pod{}
+	pods := map[string]kube.Pod{}
 	works := map[string]target{}
 	it, err := tui.Run(tui.Options{
 		Title: fmt.Sprintf("Logs · %s · a workload follows all its pods", where),
@@ -139,13 +135,13 @@ func (a *app) klogsWith(args []string, ask bool) error {
 			if perr != nil {
 				return nil, perr
 			}
-			ps, err := parsePods(pout)
+			ps, err := kube.ParsePods(pout)
 			if err != nil {
 				return nil, err
 			}
 			var ws []target
 			if werr == nil {
-				ws, _ = parseWorkloadSelectors(wout)
+				ws, _ = workloadTargets(wout)
 			}
 			// every namespace: names carry theirs
 			wname := func(t target) string {
@@ -154,7 +150,7 @@ func (a *app) klogsWith(args []string, ask bool) error {
 				}
 				return t.Name
 			}
-			pname := func(p pod) string {
+			pname := func(p kube.Pod) string {
 				if c.AllNS {
 					return p.Namespace + "/" + p.Name
 				}
@@ -184,11 +180,11 @@ func (a *app) klogsWith(args []string, ask bool) error {
 					Hint: fmt.Sprintf("all %d pod(s), merged", n), Badge: "ALL"})
 			}
 			rank := map[string]int{"FAIL": 0, "WAIT": 1, "ok": 2, "done": 3}
-			sort.SliceStable(ps, func(i, j int) bool { return rank[ps[i].badge()] < rank[ps[j].badge()] })
+			sort.SliceStable(ps, func(i, j int) bool { return rank[ps[i].Badge()] < rank[ps[j].Badge()] })
 			for _, p := range ps {
 				pods[pname(p)] = p
-				items = append(items, tui.Item{Key: pname(p), Label: fmt.Sprintf("%-*s", w, pname(p)), Badge: p.badge(),
-					Hint: fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.status(), p.Ready, p.Total, p.Restarts, age(p.Created))})
+				items = append(items, tui.Item{Key: pname(p), Label: fmt.Sprintf("%-*s", w, pname(p)), Badge: p.Badge(),
+					Hint: fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.Status(), p.Ready, p.Total, p.Restarts, kube.Age(p.Created))})
 			}
 			if len(items) == 0 {
 				return nil, fmt.Errorf("no pods in %s", where)
@@ -200,10 +196,10 @@ func (a *app) klogsWith(args []string, ask bool) error {
 		return err
 	}
 	if ask {
-		if lo.grep = askPattern(); lo.grep == "" {
+		if lo.Grep = askPattern(); lo.Grep == "" {
 			return nil
 		}
-		if _, err := lo.compile(); err != nil {
+		if _, err := lo.Compile(); err != nil {
 			return err
 		}
 	}
@@ -213,7 +209,7 @@ func (a *app) klogsWith(args []string, ask bool) error {
 		if rex.Block() == "" {
 			return a.wlogtail([]string{spec.String()}, lo)
 		}
-		return rex.SplitBehind("logs "+t.Name, append([]string{self, "wlogtail"}, append(lo.flags(), spec.String())...)...)
+		return rex.SplitBehind("logs "+t.Name, append([]string{self, "wlogtail"}, append(lo.Flags(), spec.String())...)...)
 	}
 	p := pods[it.Key]
 	container, ok, err := pickContainer(p, true)
@@ -223,7 +219,7 @@ func (a *app) klogsWith(args []string, ask bool) error {
 	if rex.Block() == "" {
 		return a.logtail(c.Name, p.Namespace, p.Name, container, lo)
 	}
-	argv := append([]string{self, "logtail"}, lo.flags()...)
+	argv := append([]string{self, "logtail"}, lo.Flags()...)
 	argv = append(argv, c.Name, p.Namespace, p.Name)
 	if container != "" {
 		argv = append(argv, container)
@@ -234,7 +230,7 @@ func (a *app) klogsWith(args []string, ask bool) error {
 // matchesSelector: the pod carries the workload's matchLabels. The pod list
 // has no labels, so this asks by name prefix (pods are named after their
 // workload) — only used for the count shown in the picker.
-func matchesSelector(p pod, t target) bool {
+func matchesSelector(p kube.Pod, t target) bool {
 	return strings.HasPrefix(p.Name, t.Name+"-")
 }
 
@@ -242,37 +238,41 @@ func matchesSelector(p pod, t target) bool {
 // picker; mark any mix (space) and they follow in one stream, each line led
 // by its source.
 func (a *app) klogsClusters(filter string, lo logOpts, ask bool) error {
-	reads, skipped, err := a.readAllClusters("workloads and pods",
-		[]string{"get", "deployments,statefulsets,daemonsets", "-A", "-o", "json"},
-		[]string{"get", "pods", "-A", "-o", "json"})
+	type source struct {
+		c    kube.Context
+		t    *target   // a workload, or
+		p    *kube.Pod // a single pod
+		name string    // ns/name
+	}
+	res, err := readAll(a, "workloads and pods", [][]string{
+		{"get", "deployments,statefulsets,daemonsets", "-A", "-o", "json"},
+		{"get", "pods", "-A", "-o", "json"},
+	}, func(c kube.Context, out [][]byte) ([]source, error) {
+		var srcs []source
+		ws, _ := workloadTargets(out[0])
+		for _, t := range ws {
+			if t.Selector != "" {
+				t.c = c
+				srcs = append(srcs, source{c: c, t: &t, name: t.Namespace + "/" + t.Name})
+			}
+		}
+		ps, err := kube.ParsePods(out[1])
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range ps {
+			srcs = append(srcs, source{c: c, p: &p, name: p.Namespace + "/" + p.Name})
+		}
+		return srcs, nil
+	})
 	if err != nil {
 		return err
 	}
-	type source struct {
-		c    kube.Context
-		t    *target // a workload, or
-		p    *pod    // a single pod
-		name string  // ns/name
+	srcs := make([]source, len(res.Rows))
+	for i, r := range res.Rows {
+		srcs[i] = r.V
 	}
-	var srcs []source
-	for _, r := range reads {
-		ws, _ := parseWorkloadSelectors(r.out[0])
-		for _, t := range ws {
-			if t.Selector != "" {
-				t.c = r.c
-				srcs = append(srcs, source{c: r.c, t: &t, name: t.Namespace + "/" + t.Name})
-			}
-		}
-		ps, err := parsePods(r.out[1])
-		if err != nil {
-			skipped = append(skipped, r.c.Short+": "+err.Error())
-			continue
-		}
-		for _, p := range ps {
-			srcs = append(srcs, source{c: r.c, p: &p, name: p.Namespace + "/" + p.Name})
-		}
-	}
-	printSkipped(skipped)
+	printSkipped(res.Skipped)
 	if len(srcs) == 0 {
 		return fmt.Errorf("no workloads or pods on any cluster")
 	}
@@ -286,8 +286,8 @@ func (a *app) klogsClusters(filter string, lo logOpts, ask bool) error {
 		if (x.t != nil) != (y.t != nil) {
 			return x.t != nil
 		}
-		if x.p != nil && y.p != nil && rank[x.p.badge()] != rank[y.p.badge()] {
-			return rank[x.p.badge()] < rank[y.p.badge()]
+		if x.p != nil && y.p != nil && rank[x.p.Badge()] != rank[y.p.Badge()] {
+			return rank[x.p.Badge()] < rank[y.p.Badge()]
 		}
 		return x.name < y.name
 	})
@@ -304,22 +304,22 @@ func (a *app) klogsClusters(filter string, lo logOpts, ask bool) error {
 		} else {
 			p := s.p
 			it.Label = fmt.Sprintf("%-*s  %-6s %-*s", wc, s.c.Short, "pod", wn, s.name)
-			it.Hint = fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.status(), p.Ready, p.Total, p.Restarts, age(p.Created))
-			it.Badge = p.badge()
+			it.Hint = fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.Status(), p.Ready, p.Total, p.Restarts, kube.Age(p.Created))
+			it.Badge = p.Badge()
 		}
 		items[i] = it
 	}
 	chosen, err := tui.RunMulti(tui.Options{
-		Title: clustersTitle("Logs · space marks several (workloads and pods), one stream", len(reads), skipped),
+		Title: clustersTitle("Logs · space marks several (workloads and pods), one stream", res.OK, len(res.Skipped)),
 		Items: items, Query: filter})
 	if err != nil || len(chosen) == 0 {
 		return err
 	}
 	if ask {
-		if lo.grep = askPattern(); lo.grep == "" {
+		if lo.Grep = askPattern(); lo.Grep == "" {
 			return nil
 		}
-		if _, err := lo.compile(); err != nil {
+		if _, err := lo.Compile(); err != nil {
 			return err
 		}
 	}
@@ -342,87 +342,59 @@ func (a *app) klogsClusters(filter string, lo logOpts, ask bool) error {
 	if len(names) > 1 {
 		label = fmt.Sprintf("logs %s +%d", names[0], len(names)-1)
 	}
-	argv := append([]string{filepath.Join(a.binDir, "rex8s"), "wlogtail"}, lo.flags()...)
+	argv := append([]string{filepath.Join(a.binDir, "rex8s"), "wlogtail"}, lo.Flags()...)
 	return rex.SplitBehind(label, append(argv, specs...)...)
 }
-
-// podSelector marks a logSpec that follows one pod instead of a workload.
-const podSelector = "pod:"
-
-// followPod follows one pod's logs until the pod is gone.
-func (a *app) followPod(k string, s logSpec, label lineLabel, out *sync.Mutex, since string, re *regexp.Regexp) {
-	name := strings.TrimPrefix(s.selector, podSelector)
-	links := a.newLogLinker(s.ctx, s.ns)
-	args := []string{"--context", s.ctx, "-n", s.ns, "logs", "-f", name, "--all-containers", "--prefix"}
-	if since != "" {
-		args = append(args, "--since="+since)
-	} else if re != nil {
-		args = append(args, "--tail=500")
-	} else {
-		args = append(args, "--tail=30")
-	}
-	cmd := exec.Command(k, args...)
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-	pipe, _ := cmd.StdoutPipe()
-	cmd.Stderr = cmd.Stdout
-	if err := cmd.Start(); err != nil {
-		return
-	}
-	copyLines(pipe, out, re, links, label, "")
-	_ = cmd.Wait()
-	out.Lock()
-	fmt.Println(label("", "") + tui.Dim.Render("(logs of pod "+name+" ended)"))
-	out.Unlock()
-}
-
-var streamColors = []string{"39", "214", "170", "42", "203", "111"}
 
 // wlogtail follows every pod of one or more workloads, one merged stream
 // (runs in its own pane). When the set of pods changes (a rollout), the
 // stream is restarted so the new pods show up.
 func (a *app) wlogtail(raw []string, lo logOpts) error {
-	re, err := lo.compile()
+	re, err := lo.Compile()
 	if err != nil {
 		return err
 	}
-	var specs []logSpec
+	var specs []logstream.Spec
 	for _, r := range raw {
-		if s, ok := parseLogSpec(r); ok {
+		if s, ok := logstream.ParseSpec(r); ok {
 			specs = append(specs, s)
 		}
 	}
 	if len(specs) == 0 {
 		return fmt.Errorf("wlogtail: nothing to follow")
 	}
-	k, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
+	cl.Timeout = 30 * time.Second
 	var labels []string
+	clusters := map[string]kube.Context{}
 	prod := false
 	for _, s := range specs {
-		labels = append(labels, s.label)
-		if c, err := a.context(s.ctx); err == nil && c.Prod {
-			prod = true
+		labels = append(labels, s.Label)
+		if c, err := a.context(s.Ctx); err == nil {
+			clusters[s.Ctx] = c
+			prod = prod || c.Prod
 		}
 	}
 	rex.Rename("logs " + strings.Join(labels, ", "))
-	if c, err := a.context(specs[0].ctx); err == nil {
+	if c, ok := clusters[specs[0].Ctx]; ok {
 		if prod {
 			c.Prod = true
 		}
 		a.tint(c)
 	}
-	fmt.Println(tui.Dim.Render("following " + strings.Join(labels, " · ") + lo.describe() + " · new pods join after a rollout · ctrl+c to stop"))
+	fmt.Println(tui.Dim.Render("following " + strings.Join(labels, " · ") + lo.Describe() + " · new pods join after a rollout · ctrl+c to stop"))
 
-	var out sync.Mutex
+	f := &logstream.Follower{Client: cl, Clusters: clusters, Links: a.logLinks, Grep: re, Since: lo.Since}
 	var wg sync.WaitGroup
 	for i, s := range specs {
-		label := streamLabel(s, streamColors[i%len(streamColors)], len(specs) > 1)
+		label := logstream.StreamLabel(s.Label, logstream.StreamColors[i%len(logstream.StreamColors)], len(specs) > 1)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a.followWorkload(k, s, label, &out, lo.since, re)
+			f.Follow(context.Background(), s, label)
 		}()
 	}
 	wg.Wait()
@@ -431,211 +403,12 @@ func (a *app) wlogtail(raw []string, lo logOpts) error {
 	return nil
 }
 
-func (a *app) followWorkload(k string, s logSpec, label lineLabel, out *sync.Mutex, since string, re *regexp.Regexp) {
-	if strings.HasPrefix(s.selector, podSelector) {
-		a.followPod(k, s, label, out, since, re)
-		return
+// logLinks is the log streams' Linker maker: the forward.Linker of the
+// stream's cluster and namespace, or nil (no links: not a terminal, or
+// log_links: off).
+func (a *app) logLinks(ctx, ns string) logstream.Linker {
+	if l := a.newLogLinker(ctx, ns); l != nil {
+		return l
 	}
-	links := a.newLogLinker(s.ctx, s.ns)
-	for {
-		names, err := runningPods(k, a.src, s.ctx, s.ns, s.selector)
-		if err != nil || len(names) == 0 {
-			out.Lock()
-			fmt.Println(label("", "") + tui.Dim.Render("(no running pods; retrying)"))
-			out.Unlock()
-			time.Sleep(10 * time.Second)
-			continue
-		}
-		args := []string{"--context", s.ctx, "-n", s.ns, "logs", "-f", "-l", s.selector, "--prefix",
-			"--all-containers", "--max-log-requests=50"}
-		if since == "" {
-			tail := "--tail=30"
-			if re != nil {
-				tail = "--tail=500" // grep: look further back
-			}
-			args = append(args, tail)
-		} else {
-			args = append(args, "--since="+since)
-		}
-		cmd := exec.Command(k, args...)
-		cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-		pipe, _ := cmd.StdoutPipe()
-		cmd.Stderr = cmd.Stdout
-		if err := cmd.Start(); err != nil {
-			return
-		}
-		done := make(chan struct{})
-		go func() {
-			copyLines(pipe, out, re, links, label, "")
-			close(done)
-		}()
-		// restart when the pods change, so new ones are followed too
-		changed := false
-		start := time.Now()
-	watch:
-		for {
-			select {
-			case <-done:
-				break watch
-			case <-time.After(15 * time.Second):
-				now, err := runningPods(k, a.src, s.ctx, s.ns, s.selector)
-				if err == nil && strings.Join(now, ",") != strings.Join(names, ",") {
-					changed = true
-					_ = cmd.Process.Kill()
-					<-done
-					break watch
-				}
-			}
-		}
-		_ = cmd.Wait()
-		if !changed && time.Since(start) < 5*time.Second {
-			time.Sleep(5 * time.Second) // kubectl failing fast: don't spin
-		}
-		if changed {
-			out.Lock()
-			fmt.Println(label("", "") + tui.Dim.Render("── pods changed, following the new set ──"))
-			out.Unlock()
-		}
-		since = "30s" // the new pods' first lines (a few may repeat)
-	}
-}
-
-// lineLabel is what leads a log line, given the pod and container that
-// wrote it ("" when unknown).
-type lineLabel func(pod, container string) string
-
-// copyLines prints the lines that pass the grep, with their cluster URLs
-// made clickable (links may be nil). kubectl's "[pod/NAME/CONTAINER] "
-// prefix is taken off and handed to label; pod is the pod writing the lines
-// when kubectl does not prefix them.
-func copyLines(r io.Reader, out *sync.Mutex, re *regexp.Regexp, links *logLinker, label lineLabel, pod string) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		raw, p, c := sc.Text(), pod, ""
-		if m := podPrefixRe.FindStringSubmatch(raw); m != nil {
-			p, c, raw = m[1], m[2], raw[len(m[0]):]
-		}
-		if re != nil && !re.MatchString(raw) {
-			continue
-		}
-		// links first: the highlight must not split a URL, and skips the
-		// links' targets
-		line := highlightOutsideLinks(links.line(raw, p), re)
-		out.Lock()
-		fmt.Println(label(p, c) + line)
-		out.Unlock()
-	}
-}
-
-// streamLabel: for a stream of several sources "CLUSTER POD" in the
-// source's color, for one source the pod alone, dim; the container only
-// when it is not named like the workload or the pod (web-7d9f/web).
-func streamLabel(s logSpec, color string, multi bool) lineLabel {
-	short, name, _ := strings.Cut(s.label, " ")
-	style := tui.Dim
-	if multi {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color(color))
-	}
-	return func(pod, container string) string {
-		text := s.label
-		if pod != "" {
-			text = pod
-			if multi {
-				text = short + " " + pod
-			}
-			if container != "" && container != name && !strings.HasPrefix(pod, container) {
-				text += "/" + container
-			}
-		} else if !multi {
-			return ""
-		}
-		return style.Render(text) + " "
-	}
-}
-
-// logOpts: klogs -g / -s, passed to the log panes as --grep=/--since=.
-type logOpts struct{ grep, since string }
-
-func (lo logOpts) flags() []string {
-	var f []string
-	if lo.grep != "" {
-		f = append(f, "--grep="+lo.grep)
-	}
-	if lo.since != "" {
-		f = append(f, "--since="+lo.since)
-	}
-	return f
-}
-
-func (lo logOpts) compile() (*regexp.Regexp, error) {
-	if lo.grep == "" {
-		return nil, nil
-	}
-	re, err := regexp.Compile("(?i)" + lo.grep)
-	if err != nil {
-		return nil, fmt.Errorf("-g %q: %v", lo.grep, err)
-	}
-	return re, nil
-}
-
-func (lo logOpts) describe() string {
-	s := ""
-	if lo.grep != "" {
-		s += " · only /" + lo.grep + "/"
-	}
-	if lo.since != "" {
-		s += " · since " + lo.since
-	}
-	return s
-}
-
-// splitLogFlags takes --grep=/--since= out of a log pane's arguments.
-func splitLogFlags(args []string) ([]string, logOpts) {
-	var lo logOpts
-	var rest []string
-	for _, a := range args {
-		switch {
-		case strings.HasPrefix(a, "--grep="):
-			lo.grep = strings.TrimPrefix(a, "--grep=")
-		case strings.HasPrefix(a, "--since="):
-			lo.since = strings.TrimPrefix(a, "--since=")
-		default:
-			rest = append(rest, a)
-		}
-	}
-	return rest, lo
-}
-
-var matchStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("214"))
-
-var osc8Re = regexp.MustCompile("\x1b\\]8;;[^\x1b]*\x1b\\\\")
-
-// highlightOutsideLinks highlights re's matches in the visible text only,
-// leaving the OSC 8 link sequences (and their targets) untouched.
-func highlightOutsideLinks(line string, re *regexp.Regexp) string {
-	if re == nil {
-		return line
-	}
-	var b strings.Builder
-	last := 0
-	for _, m := range osc8Re.FindAllStringIndex(line, -1) {
-		b.WriteString(re.ReplaceAllStringFunc(line[last:m[0]], func(x string) string { return matchStyle.Render(x) }))
-		b.WriteString(line[m[0]:m[1]])
-		last = m[1]
-	}
-	b.WriteString(re.ReplaceAllStringFunc(line[last:], func(x string) string { return matchStyle.Render(x) }))
-	return b.String()
-}
-
-// grepLine: with no pattern every line passes; otherwise only matching
-// lines, with the matches highlighted.
-func grepLine(line string, re *regexp.Regexp) (string, bool) {
-	if re == nil {
-		return line, true
-	}
-	if !re.MatchString(line) {
-		return "", false
-	}
-	return re.ReplaceAllStringFunc(line, func(m string) string { return matchStyle.Render(m) }), true
+	return nil
 }

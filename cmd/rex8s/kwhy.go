@@ -31,9 +31,9 @@ func (a *app) kwhy(filter string) error {
 		return err
 	}
 	if rex.Block() == "" {
-		return a.whytail(sel.ctx.Name, sel.ns, sel.pod.Name)
+		return a.whytail(sel.C.Name, sel.V.Namespace, sel.V.Name)
 	}
-	return rex.SplitBehind("why "+sel.pod.Name, filepath.Join(a.binDir, "rex8s"), "whytail", sel.ctx.Name, sel.ns, sel.pod.Name)
+	return rex.SplitBehind("why "+sel.V.Name, filepath.Join(a.binDir, "rex8s"), "whytail", sel.C.Name, sel.V.Namespace, sel.V.Name)
 }
 
 // aiCommand resolves the CLI used by kwhy (config ai_command).

@@ -8,39 +8,50 @@ import (
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
+// jobQueries reads a cluster's Jobs and CronJobs, for parseJobsAndCrons.
+var jobQueries = [][]string{{"get", "jobs", "-A", "-o", "json"}, {"get", "cronjobs", "-A", "-o", "json"}}
+
+// jobsAndCrons is one cluster's Jobs and CronJobs.
+type jobsAndCrons struct {
+	jobs  []kube.Job
+	crons []kube.CronJob
+}
+
+// parseJobsAndCrons parses jobQueries' answers as a single row.
+func parseJobsAndCrons(_ kube.Context, out [][]byte) ([]jobsAndCrons, error) {
+	jobs, err := kube.ParseJobs(out[0])
+	if err != nil {
+		return nil, err
+	}
+	crons, err := kube.ParseCronJobs(out[1])
+	if err != nil {
+		return nil, err
+	}
+	return []jobsAndCrons{{jobs, crons}}, nil
+}
+
 // kjobsAll: kjobs -A — the Jobs and CronJobs of every cluster in one picker,
 // failed first wherever they are. Same preview and actions as kjobs.
 func (a *app) kjobsAll(state, filter string) error {
-	reads, skipped, err := a.readAllClusters("jobs",
-		[]string{"get", "jobs", "-A", "-o", "json"}, []string{"get", "cronjobs", "-A", "-o", "json"})
+	res, err := readAll(a, "jobs", jobQueries, parseJobsAndCrons)
 	if err != nil {
 		return err
 	}
 	type parsed struct {
 		c     kube.Context
-		jobs  []job
-		crons []cronJob
+		jobs  []kube.Job
+		crons []kube.CronJob
 	}
 	var ps []parsed
 	wc, w := 0, 0
-	for _, r := range reads {
-		jobs, err := parseJobs(r.out[0])
-		if err != nil {
-			skipped = append(skipped, r.c.Short+": "+err.Error())
-			continue
-		}
-		crons, err := parseCronJobs(r.out[1])
-		if err != nil {
-			skipped = append(skipped, r.c.Short+": "+err.Error())
-			continue
-		}
-		ps = append(ps, parsed{r.c, jobs, crons})
-		wc = max(wc, len(r.c.Short))
-		w = max(w, jobNameWidth(jobs, crons))
+	for _, r := range res.Rows {
+		ps = append(ps, parsed{r.C, r.V.jobs, r.V.crons})
+		wc = max(wc, len(r.C.Short))
+		w = max(w, jobNameWidth(r.V.jobs, r.V.crons))
 	}
-	printSkipped(skipped)
+	printSkipped(res.Skipped)
 
-	jobsByKey, cronsByKey, cronStates := map[string]job{}, map[string]cronJob{}, map[string]string{}
+	jobsByKey, cronsByKey, cronStates := map[string]kube.Job{}, map[string]kube.CronJob{}, map[string]string{}
 	clusterOf := map[string]int{} // key → index in ps
 	var rows []jobRow
 	for i, p := range ps {
@@ -65,7 +76,7 @@ func (a *app) kjobsAll(state, filter string) error {
 	if err != nil {
 		return err
 	}
-	title := clustersTitle("Jobs", len(ps), skipped)
+	title := clustersTitle("Jobs", len(ps), len(res.Skipped))
 	if state != "" {
 		title += " · " + state
 	}

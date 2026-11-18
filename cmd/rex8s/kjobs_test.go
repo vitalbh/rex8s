@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vitalbh/rex8s/internal/kube"
 )
 
 const jobsJSON = `{"items":[
@@ -20,29 +22,9 @@ const cronsJSON = `{"items":[
  {"metadata":{"name":"sitemap","namespace":"web"},"spec":{"schedule":"0 */6 * * *","suspend":true},"status":{}}
 ]}`
 
-func TestParseJobs(t *testing.T) {
-	jobs, err := parseJobs([]byte(jobsJSON))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]string{}
-	for _, j := range jobs {
-		got[j.Name] = j.State
-	}
-	want := map[string]string{"export-1": "failed", "export-0": "done", "migrate": "running"}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("%s: state %q, want %q", k, got[k], v)
-		}
-	}
-	if jobs[1].took() != "1m40s" || jobs[0].Cron != "export" {
-		t.Errorf("took %q cron %q", jobs[1].took(), jobs[0].Cron)
-	}
-}
-
 func TestCronStateAndItems(t *testing.T) {
-	jobs, _ := parseJobs([]byte(jobsJSON))
-	crons, err := parseCronJobs([]byte(cronsJSON))
+	jobs, _ := kube.ParseJobs([]byte(jobsJSON))
+	crons, err := kube.ParseCronJobs([]byte(cronsJSON))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +35,7 @@ func TestCronStateAndItems(t *testing.T) {
 		t.Errorf("sitemap: %q, want suspended", s)
 	}
 
-	items, err := jobItems(jobs, crons, "", map[string]job{}, map[string]cronJob{}, map[string]string{})
+	items, err := jobItems(jobs, crons, "", map[string]kube.Job{}, map[string]kube.CronJob{}, map[string]string{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +49,7 @@ func TestCronStateAndItems(t *testing.T) {
 	}
 
 	for state, n := range map[string]int{"failed": 1, "running": 1, "done": 1, "cron": 2, "suspended": 1} {
-		items, err := jobItems(jobs, crons, state, map[string]job{}, map[string]cronJob{}, map[string]string{})
+		items, err := jobItems(jobs, crons, state, map[string]kube.Job{}, map[string]kube.CronJob{}, map[string]string{})
 		if err != nil || len(items) != n {
 			t.Errorf("state %s: %d items (%v), want %d", state, len(items), err, n)
 		}

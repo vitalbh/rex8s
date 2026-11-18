@@ -3,87 +3,69 @@ package main
 import (
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
+	"github.com/vitalbh/rex8s/internal/demo"
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
+	"golang.org/x/term"
 )
 
-// clusterRead is what one `kubectl get` returned on one cluster.
-type clusterRead struct {
-	c   kube.Context
-	out [][]byte // one per query, in order
-}
+// clusterProbe is how long a multi-cluster read waits for a TCP connection
+// to a cluster's API server before skipping it as unreachable.
+const clusterProbe = 3 * time.Second
 
-// readAllClusters runs the queries on every cluster at once and returns the
-// clusters that answered every query, plus a "SHORT: why" line for each
-// cluster that did not (login expired, unreachable…). what names the
-// objects for the progress line ("services", "pods").
-func (a *app) readAllClusters(what string, queries ...[]string) ([]clusterRead, []string, error) {
+// reader is a fleet.Reader for multi-cluster reads, 20s per query.
+func (a *app) reader() (*fleet.Reader, error) {
 	cl, err := a.client(a.src)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	cl.Timeout = 20 * time.Second
+	return a.readerFor(cl), nil
+}
+
+// readerFor is a fleet.Reader that reads with cl and probes each cluster's
+// API server first (not in demo mode, whose servers do not exist).
+func (a *app) readerFor(cl kube.Client) *fleet.Reader {
+	r := &fleet.Reader{Client: cl}
+	if !demo.Active() {
+		r.Probe = clusterProbe
+	}
+	return r
+}
+
+// readAll runs the queries on every cluster at once, with a "reading WHAT
+// on N clusters…" line on stderr while it runs.
+func readAll[T any](a *app, what string, queries [][]string, parse fleet.Parse[T]) (fleet.Result[T], error) {
+	r, err := a.reader()
+	if err != nil {
+		return fleet.Result[T]{}, err
+	}
 	raw, err := kube.Load(a.src)
 	if err != nil {
-		return nil, nil, err
+		return fleet.Result[T]{}, err
 	}
-	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 	fmt.Fprintln(os.Stderr, tui.Dim.Render(fmt.Sprintf("reading %s on %d clusters…", what, len(clusters))))
-	defer fmt.Fprint(os.Stderr, "\033[1A\033[2K")
-
-	type res struct {
-		out [][]byte
-		err error
+	if term.IsTerminal(int(os.Stderr.Fd())) { // erase the line; not in a redirected stderr
+		defer fmt.Fprint(os.Stderr, "\033[1A\033[2K")
 	}
-	results := make([]res, len(clusters))
-	var wg sync.WaitGroup
-	for i, c := range clusters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for _, q := range queries {
-				out, err := cl.Get(c.Name, q...)
-				if err != nil {
-					results[i].err = err
-					return
-				}
-				results[i].out = append(results[i].out, out)
-			}
-		}()
-	}
-	wg.Wait()
-
-	var ok []clusterRead
-	var skipped []string
-	for i, r := range results {
-		c := clusters[i]
-		if r.err != nil {
-			why := lastLogLine(r.err.Error())
-			if kube.AuthExpired(r.err) {
-				why = "login expired (kauth " + c.Short + ")"
-			}
-			skipped = append(skipped, c.Short+": "+why)
-			continue
-		}
-		ok = append(ok, clusterRead{c, r.out})
-	}
-	return ok, skipped, nil
+	return fleet.Read(r, clusters, queries, parse), nil
 }
 
 // clustersTitle: "Pods on 4 clusters (1 skipped)".
-func clustersTitle(what string, ok int, skipped []string) string {
+func clustersTitle(what string, ok, skipped int) string {
 	t := fmt.Sprintf("%s on %d clusters", what, ok)
-	if len(skipped) > 0 {
-		t += fmt.Sprintf(" (%d skipped)", len(skipped))
+	if skipped > 0 {
+		t += fmt.Sprintf(" (%d skipped)", skipped)
 	}
 	return t
 }
 
-func printSkipped(skipped []string) {
+func printSkipped(skipped []fleet.Skip) {
 	for _, s := range skipped {
-		fmt.Fprintln(os.Stderr, tui.Dim.Render("skipped "+s))
+		fmt.Fprintln(os.Stderr, tui.Dim.Render("skipped "+s.String()))
 	}
 }

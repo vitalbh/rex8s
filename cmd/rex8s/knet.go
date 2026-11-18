@@ -2,13 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
-	"github.com/vitalbh/rex8s/internal/guard"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
@@ -42,23 +41,21 @@ func (a *app) nettail(ctxName, ns string) error {
 	if image == "" {
 		image = netDebugImage
 	}
-	if c.Prod && !guard.Confirm(c.Short, "kubectl run "+image+" in "+ns, "a temporary pod with network tools; removed when you exit") {
-		return nil
+	if ok, err := confirmChange([]kube.Context{c}, "knet: kubectl run "+image+" in "+ns, "a temporary pod with network tools; removed when you exit"); !ok {
+		return err
 	}
-	bin, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
 	name := fmt.Sprintf("knet-%d", time.Now().Unix()%100000)
 	fmt.Println(tui.Dim.Render(fmt.Sprintf("pod %s in %s · try: curl -sv http://SERVICE.%s:PORT · dig SERVICE · nc -vz HOST PORT · exit to leave", name, ns, ns)))
-	cmd := exec.Command(bin, "--context", ctxName, "-n", ns, "run", name, "--rm", "-it", "--restart=Never",
+	runErr := cl.Run(ctxName, "-n", ns, "run", name, "--rm", "-it", "--restart=Never",
 		"--image="+image, "--labels=app.kubernetes.io/created-by=rex8s-knet", "--", "bash")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-	runErr := cmd.Run()
 	// --rm only works when kubectl ends cleanly: make sure the pod is gone
-	k, _ := a.kubectl()
-	_, _ = kubectlOut(k, a.src, 20*time.Second, "--context", ctxName, "-n", ns, "delete", "pod", name, "--ignore-not-found", "--wait=false")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, _ = cl.Output(ctx, ctxName, "-n", ns, "delete", "pod", name, "--ignore-not-found", "--wait=false")
 	if runErr != nil {
 		fmt.Fprint(os.Stderr, tui.Dim.Render("\nshell ended ("+runErr.Error()+") · press enter to close"))
 		bufio.NewReader(os.Stdin).ReadString('\n')

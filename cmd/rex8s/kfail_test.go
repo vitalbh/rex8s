@@ -3,10 +3,12 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/vitalbh/rex8s/internal/kube"
 )
 
 func TestFailingPods(t *testing.T) {
-	ps := []pod{
+	ps := []kube.Pod{
 		{Name: "healthy", Phase: "Running", Ready: 1, Total: 1},
 		{Name: "old-restarts", Phase: "Running", Ready: 1, Total: 1, Restarts: 3, LastReason: "Completed"},
 		{Name: "oom", Phase: "Running", Ready: 1, Total: 1, Restarts: 2, LastReason: "OOMKilled"},

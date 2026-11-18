@@ -1,14 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
@@ -37,15 +37,11 @@ func (a *app) kjunk(args []string) error {
 			filter = arg
 		}
 	}
-	k, err := a.kubectl()
-	if err != nil {
-		return err
-	}
 	raw, err := kube.Load(a.src)
 	if err != nil {
 		return err
 	}
-	clusters := uniqueClusters(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 	cl, err := a.client(a.src)
 	if err != nil {
 		return err
@@ -53,30 +49,17 @@ func (a *app) kjunk(args []string) error {
 	cl.Timeout = 40 * time.Second
 
 	var found []junk
-	var skipped []string
+	var skipped []fleet.Skip
+	r := a.readerFor(cl)
+	queries := junkQueries(cats)
 	load := func() ([]tui.Item, error) {
-		found, skipped = nil, nil
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		for _, c := range clusters {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				js, err := clusterJunk(cl, c, cats)
-				mu.Lock()
-				defer mu.Unlock()
-				if err != nil {
-					why := lastLogLine(err.Error())
-					if kube.AuthExpired(err) {
-						why = "login expired (kauth " + c.Short + ")"
-					}
-					skipped = append(skipped, c.Short+": skipped, "+why)
-					return
-				}
-				found = append(found, js...)
-			}()
+		res := fleet.Read(r, clusters, queries, func(c kube.Context, out [][]byte) ([]junk, error) {
+			return clusterJunk(cl, c, cats, out), nil
+		})
+		found, skipped = nil, res.Skipped
+		for _, row := range res.Rows {
+			found = append(found, row.V)
 		}
-		wg.Wait()
 		if len(found) == 0 {
 			return nil, fmt.Errorf("nothing to clean up on %d clusters", len(clusters))
 		}
@@ -113,9 +96,7 @@ func (a *app) kjunk(args []string) error {
 		title += " · " + strings.Join(cs, ", ")
 	}
 	its, err := tui.RunMulti(tui.Options{Title: title, Load: load, Query: filter})
-	for _, s := range skipped {
-		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
-	}
+	printSkipped(skipped)
 	if err != nil || len(its) == 0 {
 		return err
 	}
@@ -127,34 +108,31 @@ func (a *app) kjunk(args []string) error {
 	}
 
 	fmt.Println(tui.Bold.Render(fmt.Sprintf("delete %d object(s)", len(chosen))))
-	prodSet := map[string]bool{}
-	var prod []string
+	touched := make([]kube.Context, 0, len(chosen))
 	for _, j := range chosen {
 		tag := ""
 		if j.c.Prod {
 			tag = " " + tui.Prod.Render(" PROD ")
-			if !prodSet[j.c.Short] {
-				prodSet[j.c.Short] = true
-				prod = append(prod, j.c.Short)
-			}
 		}
+		touched = append(touched, j.c)
 		fmt.Printf("  %-8s %-5s %s%s\n", j.c.Short, j.cat, j.ref(), tag)
 	}
-	sort.Strings(prod)
-	if len(prod) > 0 && os.Getenv("REX8S_FORCE") == "" && !confirmProd(fmt.Sprintf("Delete %d object(s) on", len(chosen)), prod) {
-		fmt.Fprintln(os.Stderr, "cancelled.")
-		return nil
+	if ok, err := confirmChange(touched, fmt.Sprintf("kjunk: delete %d object(s)", len(chosen))); !ok {
+		return err
 	}
 	failed := 0
 	for _, j := range chosen {
-		args := []string{"--context", j.c.Name, "delete", j.kind, j.name, "--wait=false"}
+		args := []string{"delete", j.kind, j.name, "--wait=false"}
 		if j.ns != "" {
 			args = append(args, "-n", j.ns)
 		}
 		if j.kind == "job" {
 			args = append(args, "--cascade=background") // its pods too
 		}
-		if _, err := kubectlOut(k, a.src, 30*time.Second, args...); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err := cl.Output(ctx, j.c.Name, args...)
+		cancel()
+		if err != nil {
 			failed++
 			fmt.Println(tui.Err.Render("  ✗ "+j.c.Short+" "+j.ref()) + "  " + tui.Dim.Render(lastLogLine(err.Error())))
 			continue
@@ -198,32 +176,42 @@ const (
 	junkJobAge = 7 * 24 * time.Hour
 )
 
-func clusterJunk(cl kube.Client, c kube.Context, cats map[string]bool) ([]junk, error) {
+// junkQueries: what kjunk reads from each cluster for cats (all when
+// empty): pods for debug and pod, jobs for job. PVs are read on their own
+// (clusterJunk), since many users may not list them.
+func junkQueries(cats map[string]bool) [][]string {
 	want := func(cat string) bool { return len(cats) == 0 || cats[cat] }
-	var out []junk
+	var q [][]string
 	if want("debug") || want("pod") {
-		data, err := cl.Get(c.Name, "get", "pods", "-A", "-o", "json")
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, podJunk(data, time.Now(), want("debug"), want("pod"))...)
+		q = append(q, []string{"get", "pods", "-A", "-o", "json"})
 	}
 	if want("job") {
-		data, err := cl.Get(c.Name, "get", "jobs", "-A", "-o", "json")
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, jobJunk(data, time.Now())...)
+		q = append(q, []string{"get", "jobs", "-A", "-o", "json"})
+	}
+	return q
+}
+
+// clusterJunk finds c's leftovers in out, the answers to junkQueries(cats),
+// and reads its Released PVs when cats wants them.
+func clusterJunk(cl kube.Client, c kube.Context, cats map[string]bool, out [][]byte) []junk {
+	want := func(cat string) bool { return len(cats) == 0 || cats[cat] }
+	var js []junk
+	if want("debug") || want("pod") {
+		js = append(js, podJunk(out[0], time.Now(), want("debug"), want("pod"))...)
+		out = out[1:]
+	}
+	if want("job") {
+		js = append(js, jobJunk(out[0], time.Now())...)
 	}
 	if want("pv") {
 		if data, err := cl.Get(c.Name, "get", "pv", "-o", "json"); err == nil {
-			out = append(out, pvJunk(data, time.Now())...)
+			js = append(js, pvJunk(data, time.Now())...)
 		}
 	}
-	for i := range out {
-		out[i].c = c
+	for i := range js {
+		js[i].c = c
 	}
-	return out, nil
+	return js
 }
 
 type ownerMeta struct {

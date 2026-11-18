@@ -2,16 +2,14 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/vitalbh/rex8s/internal/guard"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
@@ -22,97 +20,42 @@ const (
 	nodeDebugImage     = "busybox:1.36"
 )
 
-type node struct {
-	Name     string
-	Ready    bool
-	Pressure []string // MemoryPressure, DiskPressure, PIDPressure that are True
-	Roles    []string
-	Version  string
-	Created  time.Time
-	Unsched  bool
-}
-
-func parseNodes(data []byte) ([]node, error) {
-	var list struct {
-		Items []struct {
-			Metadata struct {
-				Name              string            `json:"name"`
-				CreationTimestamp time.Time         `json:"creationTimestamp"`
-				Labels            map[string]string `json:"labels"`
-			} `json:"metadata"`
-			Spec struct {
-				Unschedulable bool `json:"unschedulable"`
-			} `json:"spec"`
-			Status struct {
-				Conditions []struct {
-					Type   string `json:"type"`
-					Status string `json:"status"`
-				} `json:"conditions"`
-				NodeInfo struct {
-					KubeletVersion string `json:"kubeletVersion"`
-				} `json:"nodeInfo"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(data, &list); err != nil {
-		return nil, err
-	}
-	out := make([]node, 0, len(list.Items))
-	for _, it := range list.Items {
-		n := node{Name: it.Metadata.Name, Version: it.Status.NodeInfo.KubeletVersion,
-			Created: it.Metadata.CreationTimestamp, Unsched: it.Spec.Unschedulable}
-		for _, c := range it.Status.Conditions {
-			switch {
-			case c.Type == "Ready":
-				n.Ready = c.Status == "True"
-			case strings.HasSuffix(c.Type, "Pressure") && c.Status == "True":
-				n.Pressure = append(n.Pressure, c.Type)
-			}
-		}
-		for l := range it.Metadata.Labels {
-			if r, ok := strings.CutPrefix(l, "node-role.kubernetes.io/"); ok && r != "" {
-				n.Roles = append(n.Roles, r)
-			}
-		}
-		sort.Strings(n.Roles)
-		out = append(out, n)
-	}
-	// problems first, then by name
-	sort.SliceStable(out, func(i, j int) bool {
-		if bi, bj := out[i].badge() != "", out[j].badge() != ""; bi != bj {
+// sortNodes: problems first, then by name.
+func sortNodes(ns []kube.Node) {
+	sort.SliceStable(ns, func(i, j int) bool {
+		if bi, bj := nodeBadge(ns[i]) != "", nodeBadge(ns[j]) != ""; bi != bj {
 			return bi
 		}
-		return out[i].Name < out[j].Name
+		return ns[i].Name < ns[j].Name
 	})
-	return out, nil
 }
 
-func (n node) badge() string {
+func nodeBadge(n kube.Node) string {
 	switch {
 	case !n.Ready:
 		return "DOWN"
 	case len(n.Pressure) > 0:
 		return "PRES"
-	case n.Unsched:
+	case n.Unschedulable:
 		return "CORD"
 	}
 	return ""
 }
 
-func (n node) hint() string {
+func nodeHint(n kube.Node) string {
 	parts := []string{}
 	if !n.Ready {
 		parts = append(parts, "NotReady")
 	}
 	parts = append(parts, n.Pressure...)
-	if n.Unsched {
+	if n.Unschedulable {
 		parts = append(parts, "cordoned")
 	}
 	roles := "-"
 	if len(n.Roles) > 0 {
 		roles = strings.Join(n.Roles, ",")
 	}
-	parts = append(parts, roles, n.Version, age(n.Created))
+	parts = append(parts, roles, n.Version, kube.Age(n.Created))
 	return strings.Join(parts, "  ")
 }
 
@@ -136,17 +79,18 @@ func (a *app) knode(filter string) error {
 			if err != nil {
 				return nil, err
 			}
-			ns, err := parseNodes(out)
+			ns, err := kube.ParseNodes(out)
 			if err != nil {
 				return nil, err
 			}
+			sortNodes(ns)
 			w := 0
 			for _, n := range ns {
 				w = max(w, len(n.Name))
 			}
 			items := make([]tui.Item, 0, len(ns))
 			for _, n := range ns {
-				items = append(items, tui.Item{Key: n.Name, Label: fmt.Sprintf("%-*s", w, n.Name), Hint: n.hint(), Badge: n.badge()})
+				items = append(items, tui.Item{Key: n.Name, Label: fmt.Sprintf("%-*s", w, n.Name), Hint: nodeHint(n), Badge: nodeBadge(n)})
 			}
 			return items, nil
 		},
@@ -168,10 +112,10 @@ func (a *app) nodetail(ctxName, nodeName string) error {
 	}
 	rex.Rename("node " + c.Short + "/" + nodeName)
 	a.tint(c)
-	if c.Prod && !guard.Confirm(c.Short, "kubectl debug node/"+nodeName, "privileged pod on the node, with its filesystem at /host") {
-		return nil
+	if ok, err := confirmChange([]kube.Context{c}, "knode: kubectl debug node/"+nodeName, "privileged pod on the node, with its filesystem at /host"); !ok {
+		return err
 	}
-	bin, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
@@ -181,19 +125,19 @@ func (a *app) nodetail(ctxName, nodeName string) error {
 	}
 	fmt.Println(tui.Dim.Render("the node's filesystem is at /host · chroot /host to use its tools · exit to leave"))
 	start := time.Now()
-	cmd := exec.Command(bin, "--context", ctxName, "-n", nodeDebugNamespace, "debug", "node/"+nodeName,
+	runErr := cl.Run(ctxName, "-n", nodeDebugNamespace, "debug", "node/"+nodeName,
 		"-it", "--profile=sysadmin", "--image="+image, "--", "sh")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-	runErr := cmd.Run()
 
 	// kubectl debug leaves the pod behind: remove the ones this run created
-	k, _ := a.kubectl()
-	if out, err := kubectlOut(k, a.src, 20*time.Second, "--context", ctxName, "-n", nodeDebugNamespace, "get", "pods", "-o", "json"); err == nil {
-		if ps, err := parsePods([]byte(out)); err == nil {
+	cl.Timeout = 20 * time.Second
+	if out, err := cl.Get(ctxName, "-n", nodeDebugNamespace, "get", "pods", "-o", "json"); err == nil {
+		if ps, err := kube.ParsePods(out); err == nil {
 			for _, p := range ps {
 				if strings.HasPrefix(p.Name, "node-debugger-"+nodeName+"-") && p.Created.After(start.Add(-10*time.Second)) {
-					if _, err := kubectlOut(k, a.src, 20*time.Second, "--context", ctxName, "-n", nodeDebugNamespace, "delete", "pod", p.Name, "--wait=false"); err == nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					_, err := cl.Output(ctx, ctxName, "-n", nodeDebugNamespace, "delete", "pod", p.Name, "--wait=false")
+					cancel()
+					if err == nil {
 						fmt.Println(tui.Dim.Render("removed debug pod " + p.Name))
 					}
 				}

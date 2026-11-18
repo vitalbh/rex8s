@@ -2,68 +2,28 @@ package main
 
 import (
 	"bufio"
-	"bytes"
+	"context"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
+	"github.com/vitalbh/rex8s/internal/logstream"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
-// prefixWriter writes each line with a prefix, one line at a time under a
-// lock shared by every stream, so lines of different clusters never mix.
-type prefixWriter struct {
-	prefix string
-	out    io.Writer
-	mu     *sync.Mutex
-	buf    []byte
-}
-
-func (p *prefixWriter) Write(b []byte) (int, error) {
-	p.buf = append(p.buf, b...)
-	for {
-		i := bytes.IndexByte(p.buf, '\n')
-		if i < 0 {
-			return len(b), nil
-		}
-		p.mu.Lock()
-		fmt.Fprint(p.out, p.prefix+string(p.buf[:i+1]))
-		p.mu.Unlock()
-		p.buf = p.buf[i+1:]
-	}
-}
-
-// pickClusters: every cluster, or the ones named (short name or context).
+// pickClusters: every cluster, or the ones named (fleet.Pick).
 func (a *app) pickClusters(names []string) ([]kube.Context, error) {
 	raw, err := kube.Load(a.src)
 	if err != nil {
 		return nil, err
 	}
-	all := uniqueClusters(kube.Contexts(raw, a.cfg))
-	if len(names) == 0 {
-		return all, nil
-	}
-	var out []kube.Context
-	for _, n := range names {
-		found := false
-		for _, c := range all {
-			if c.Short == n || c.Name == n {
-				out, found = append(out, c), true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("cluster %q not found", n)
-		}
-	}
-	return out, nil
+	return fleet.Pick(raw, a.cfg, names)
 }
 
 // kwarnAll: kwarn -A [CLUSTER...] — the Warning events of every cluster (or
@@ -74,7 +34,7 @@ func (a *app) kwarnAll(names []string) error {
 	if err != nil {
 		return err
 	}
-	bin, err := a.kubectl()
+	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
@@ -94,19 +54,19 @@ func (a *app) kwarnAll(names []string) error {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for i, c := range clusters {
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(streamColors[i%len(streamColors)]))
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(logstream.StreamColors[i%len(logstream.StreamColors)]))
 		if c.Prod {
 			style = style.Bold(true)
 		}
-		pw := &prefixWriter{prefix: style.Render(fmt.Sprintf("%-*s", w, c.Short)) + " ", out: os.Stdout, mu: &mu}
+		pw := logstream.NewPrefixWriter(style.Render(fmt.Sprintf("%-*s", w, c.Short))+" ", os.Stdout, &mu)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			seen := newWarnSeen() // across watches: a restarted watch relists
 			for {
 				start := time.Now()
-				cmd := exec.Command(bin, "--context", c.Name, "get", "events", "-A",
+				cmd := cl.Command(context.Background(), c.Name, "get", "events", "-A",
 					"--field-selector", "type=Warning", "-w", "-o", "json")
-				cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
 				var stderr strings.Builder
 				cmd.Stderr = &stderr
 				out, err := cmd.StdoutPipe()
@@ -114,7 +74,7 @@ func (a *app) kwarnAll(names []string) error {
 					err = cmd.Start()
 				}
 				if err == nil {
-					streamWarnings(out, pw, true)
+					streamWarnings(out, pw, true, seen)
 					err = cmd.Wait()
 				}
 				if kube.AuthExpired(fmt.Errorf("%s", stderr.String())) {
@@ -122,7 +82,7 @@ func (a *app) kwarnAll(names []string) error {
 					return
 				}
 				if time.Since(start) < 10*time.Second { // failing fast: say why, wait
-					why := lastLogLine(strings.TrimSpace(stderr.String()))
+					why := tui.Clean(lastLogLine(strings.TrimSpace(stderr.String())))
 					if why == "" && err != nil {
 						why = err.Error()
 					}

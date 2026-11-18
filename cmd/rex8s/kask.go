@@ -274,8 +274,8 @@ func (a *app) askpod(ctxName, ns, podName string) error {
 
 // pickAskTarget: the picker — first row the whole cluster, then every pod
 // (broken first) with kfail's preview. Returns "cluster", "pod" or "" (esc).
-func pickAskTarget(cl kube.Client, c kube.Context, filter string) (string, pod, error) {
-	pods := map[string]pod{}
+func pickAskTarget(cl kube.Client, c kube.Context, filter string) (string, kube.Pod, error) {
+	pods := map[string]kube.Pod{}
 	it, err := tui.Run(tui.Options{
 		Title: "Ask Claude about… (" + c.Short + ")",
 		Query: filter,
@@ -284,7 +284,7 @@ func pickAskTarget(cl kube.Client, c kube.Context, filter string) (string, pod, 
 			if err != nil {
 				return nil, err
 			}
-			ps, err := parsePods(out)
+			ps, err := kube.ParsePods(out)
 			if err != nil {
 				return nil, err
 			}
@@ -304,8 +304,8 @@ func pickAskTarget(cl kube.Client, c kube.Context, filter string) (string, pod, 
 			for _, p := range ps {
 				key := p.Namespace + "/" + p.Name
 				pods[key] = p
-				items = append(items, tui.Item{Key: key, Label: fmt.Sprintf("%-*s", w, key), Badge: p.badge(),
-					Hint: fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.status(), p.Ready, p.Total, p.Restarts, age(p.Created))})
+				items = append(items, tui.Item{Key: key, Label: fmt.Sprintf("%-*s", w, key), Badge: p.Badge(),
+					Hint: fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.Status(), p.Ready, p.Total, p.Restarts, kube.Age(p.Created))})
 			}
 			return items, nil
 		},
@@ -317,10 +317,10 @@ func pickAskTarget(cl kube.Client, c kube.Context, filter string) (string, pod, 
 		},
 	})
 	if err != nil || it == nil {
-		return "", pod{}, err
+		return "", kube.Pod{}, err
 	}
 	if it.Key == "cluster" {
-		return "cluster", pod{}, nil
+		return "cluster", kube.Pod{}, nil
 	}
 	return "pod", pods[it.Key], nil
 }
@@ -356,8 +356,8 @@ func clusterSnapshot(cl kube.Client, c kube.Context) string {
 	b.WriteString("```\n\n")
 
 	if podsErr == nil {
-		if ps, err := parsePods(podsOut); err == nil {
-			var broken []pod
+		if ps, err := kube.ParsePods(podsOut); err == nil {
+			var broken []kube.Pod
 			for _, p := range failingPods(ps) {
 				if brokenLive(p) {
 					broken = append(broken, p)
@@ -371,7 +371,7 @@ func clusterSnapshot(cl kube.Client, c kube.Context) string {
 						last = "  last terminated: " + p.LastReason
 					}
 					fmt.Fprintf(&b, "%s/%s  %s  ready %d/%d  restarts %d  age %s%s\n",
-						p.Namespace, p.Name, p.status(), p.Ready, p.Total, p.Restarts, age(p.Created), last)
+						p.Namespace, p.Name, p.Status(), p.Ready, p.Total, p.Restarts, kube.Age(p.Created), last)
 				}
 				if len(broken) > 40 {
 					fmt.Fprintf(&b, "… %d more\n", len(broken)-40)

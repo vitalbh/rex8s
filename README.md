@@ -4,7 +4,7 @@ A Kubernetes toolkit for the [Rex](https://www.superlogical.com/rex) terminal:
 isolated cluster panes, multi-cluster views, Flux (GitOps), a production guard
 and Claude.
 
-![rex8s in Rex: Cmd+Shift+J picks a cluster, kfail, Cmd+Shift+M opens clusters side by side, kall runs the same command in all of them](docs/tour.gif)
+![kview in Rex: a failing pod on every cluster; why (Claude), its logs and a shell open in splits beside it — production asks first](docs/kview-rex.gif)
 
 ## Quick start
 
@@ -29,6 +29,7 @@ a script runs them.
 
 | You want to… | Commands |
 |---|---|
+| **browse like k9s** | `kview` tabs for pods, workloads, services, jobs, nodes, warnings — live lists, a key per action (`-A`: every cluster) |
 | **see what's broken** | `kstatus` one screen of health · `kfail` failing pods with their last logs · `kpods` every cluster's pods · `kwarn -A` warnings of every cluster, live |
 | **read logs** | `klogs` a workload's pods in one stream (`-A`: mix pods and workloads of any cluster) · `kgrep` search them · cluster URLs in the logs are clickable |
 | **ask why** | `kwhy` Claude explains an unhealthy pod · `kask` a Claude conversation about the cluster or a pod · `kincident` a session laid out for an incident |
@@ -39,10 +40,14 @@ a script runs them.
 
 Every command, with its options: **[docs/commands.md](docs/commands.md)**.
 
+**⇧⌘J** picks a cluster for an isolated shell, **⇧⌘M** puts several side by side and `kall` types in all of them; **⇧⌘V** opens `kview` (above) on every cluster
+
+![rex8s in Rex: Cmd+Shift+J picks a cluster, kfail, Cmd+Shift+M opens clusters side by side, kall runs the same command in all of them](docs/tour.gif)
+
 <details>
 <summary><b>See it</b> — recordings of each command</summary>
 
-| Production tab: k9s · shell · warnings, tinted red | `kflux` on a staging tab |
+| Production tab (⇧⌘K): browser · shell · warnings, tinted red | `kflux` on a staging tab |
 |---|---|
 | ![production layout](docs/rex-prod.png) | ![kflux](docs/rex-kflux.png) |
 
@@ -50,10 +55,14 @@ Every command, with its options: **[docs/commands.md](docs/commands.md)**.
 
 ![kmulti: three clusters side by side, kall running the same commands in each](docs/kmulti.gif)
 
-| `fwatch`: follow a commit until it's applied and rolled out | `kwhy`: ask Claude why a pod is unhealthy |
+| `kview`: tabs, a filter, describe, a workload's pods, jobs, warnings, nodes | |
 |---|---|
+| ![kview](docs/kview.gif) | |
+| **`kpods`**: the pods of every cluster, failing first | **`kpf`**: port-forward in the background, the client command for databases |
+| ![kpods](docs/kpods.gif) | ![kpf](docs/kpf.gif) |
+| **`fwatch`**: follow a commit until it's applied and rolled out | **`kwhy`**: ask Claude why a pod is unhealthy |
 | ![fwatch](docs/fwatch.gif) | ![kwhy](docs/kwhy.gif) |
-| **`kflux`**: Flux resources, failing first | **`kwarn`**: only Warning events, live |
+| **`kflux`**: Flux resources, failing first | **`kwarn -A`**: the Warning events of every cluster, live |
 | ![kflux](docs/kflux.gif) | ![kwarn](docs/kwarn.gif) |
 | **`kfail`**: failing pods with the crashed container's last logs | **`kjobs`**: Jobs and CronJobs with logs and recent runs |
 | ![kfail](docs/kfail.gif) | ![kjobs](docs/kjobs.gif) |

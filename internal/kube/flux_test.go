@@ -75,29 +75,3 @@ func TestAuthExpired(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
-
-func TestParseWorkloads(t *testing.T) {
-	ws, err := ParseWorkloads([]byte(`{"items":[
-	 {"kind":"Deployment","metadata":{"name":"api","namespace":"app","generation":5,
-	   "labels":{"kustomize.toolkit.fluxcd.io/name":"apps","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},
-	  "spec":{"replicas":2},"status":{"observedGeneration":5,"updatedReplicas":2,"availableReplicas":1,
-	   "conditions":[{"type":"Progressing","status":"False","reason":"ProgressDeadlineExceeded","message":"timed out"}]}},
-	 {"kind":"DaemonSet","metadata":{"name":"agent","namespace":"kube-system","generation":3},
-	  "status":{"observedGeneration":3,"desiredNumberScheduled":4,"updatedNumberScheduled":4,"numberAvailable":4}},
-	 {"kind":"StatefulSet","metadata":{"name":"db","namespace":"app","generation":2},"spec":{"replicas":1},
-	  "status":{"observedGeneration":2,"updatedReplicas":1,"readyReplicas":1,"currentRevision":"db-1","updateRevision":"db-2"}}
-	]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	api, ds, sts := ws[0], ws[1], ws[2]
-	if !api.Failed || api.RolledOut() || api.KsName != "apps" || api.KsNamespace != "flux-system" {
-		t.Errorf("deployment: %+v", api)
-	}
-	if !ds.RolledOut() || ds.InProgress() {
-		t.Errorf("daemonset should be rolled out: %+v", ds)
-	}
-	if sts.RolledOut() || !sts.InProgress() {
-		t.Errorf("statefulset with pending revision is mid-rollout: %+v", sts)
-	}
-}

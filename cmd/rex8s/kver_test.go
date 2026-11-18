@@ -10,6 +10,7 @@ import (
 
 	"github.com/vitalbh/rex8s/internal/config"
 	"github.com/vitalbh/rex8s/internal/kube"
+	"github.com/vitalbh/rex8s/internal/yamledit"
 )
 
 func TestImageTag(t *testing.T) {
@@ -31,14 +32,14 @@ func TestImageTag(t *testing.T) {
 func TestVersionRows(t *testing.T) {
 	use := kube.Context{Short: "use", Prod: true}
 	stg := kube.Context{Short: "staging"}
-	w := func(c kube.Context, name, img string, extra ...containerImage) target {
-		return target{c: c, Kind: "Deployment", Namespace: "app", Name: name,
-			Containers: append(extra, containerImage{name, img})}
+	w := func(c kube.Context, name, img string, extra ...kube.Container) target {
+		return target{c: c, Workload: kube.Workload{Kind: "Deployment", Namespace: "app", Name: name,
+			Containers: append(extra, kube.Container{Name: name, Image: img})}}
 	}
 	rows := versionRows([]target{
 		w(use, "web", "acme/web:3.8.1"), w(stg, "web", "acme/web:3.8.1"),
 		// the sidecar comes first; the main container is the one named like the workload
-		w(use, "api", "acme/api:1.42.0", containerImage{"proxy", "envoy:1.30"}), w(stg, "api", "acme/api:1.43.0"),
+		w(use, "api", "acme/api:1.42.0", kube.Container{Name: "proxy", Image: "envoy:1.30"}), w(stg, "api", "acme/api:1.43.0"),
 	})
 	if len(rows) != 2 || rows[0].Name != "api" || !rows[0].differs() || rows[1].differs() {
 		t.Fatalf("rows = %+v", rows)
@@ -91,45 +92,24 @@ func TestParseNodes(t *testing.T) {
 	  {"metadata":{"name":"b","labels":{"node-role.kubernetes.io/worker":""}},"status":{"conditions":[{"type":"Ready","status":"True"}],"nodeInfo":{"kubeletVersion":"v1.30.4"}}},
 	  {"metadata":{"name":"c"},"status":{"conditions":[{"type":"Ready","status":"True"},{"type":"MemoryPressure","status":"True"}]}},
 	  {"metadata":{"name":"a"},"spec":{"unschedulable":true},"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}`
-	ns, err := parseNodes([]byte(in))
+	ns, err := kube.ParseNodes([]byte(in))
 	if err != nil {
 		t.Fatal(err)
 	}
+	sortNodes(ns)
 	got := []string{}
 	for _, n := range ns {
-		got = append(got, n.Name+":"+n.badge())
+		got = append(got, n.Name+":"+nodeBadge(n))
 	}
 	if strings.Join(got, " ") != "a:DOWN c:PRES b:" {
 		t.Errorf("nodes = %v", got)
 	}
-	if ns[2].Roles[0] != "worker" || !strings.Contains(ns[2].hint(), "v1.30.4") {
+	if ns[2].Roles[0] != "worker" || !strings.Contains(nodeHint(ns[2]), "v1.30.4") {
 		t.Errorf("b = %+v", ns[2])
 	}
 }
 
-func TestPfList(t *testing.T) {
-	a := &app{cache: t.TempDir()}
-	keep := a.pfRegister(pfEntry{PID: os.Getpid(), Service: "api", Local: 8080, Remote: 80, Started: time.Now()})
-	a.pfRegister(pfEntry{PID: 999999, Service: "gone", Started: time.Now()}) // no such process
-	es := a.pfList()
-	if len(es) != 1 || es[0].Service != "api" || es[0].URL() != "http://localhost:8080" {
-		t.Fatalf("list = %+v", es)
-	}
-	keep()
-	if es := a.pfList(); len(es) != 0 {
-		t.Fatalf("after remove: %+v", es)
-	}
-}
-
-func TestSetYAMLKey(t *testing.T) {
-	doc := "kubeconfig: ~/.kube/config\nprod_background: \"#2b1216\"   # tint\nhide: []\n"
-	got := setYAMLKey(doc, "prod_background", `"#1f1430"`)
-	if !strings.Contains(got, "prod_background: \"#1f1430\"") || !strings.Contains(got, "# tint") || !strings.Contains(got, "hide: []") || strings.Contains(got, "2b1216") {
-		t.Errorf("replace:\n%s", got)
-	}
-	if got := setYAMLKey("hide: []", "prod_background", `"off"`); got != "hide: []\nprod_background: \"off\"\n" {
-		t.Errorf("append: %q", got)
-	}
+func TestNormTint(t *testing.T) {
 	for in, want := range map[string]string{"#1F1430": "#1f1430", "1f1430": "#1f1430", "off": "off"} {
 		if got, err := normTint(in); err != nil || got != want {
 			t.Errorf("normTint(%q) = %q, %v", in, got, err)
@@ -213,29 +193,6 @@ func TestNewBroken(t *testing.T) {
 	}
 }
 
-func TestGrepLine(t *testing.T) {
-	re, err := logOpts{grep: "time ?out"}.compile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := grepLine("GET /health 200", re); ok {
-		t.Error("non-matching line kept")
-	}
-	if l, ok := grepLine("upstream TIMEOUT after 30s", re); !ok || !strings.Contains(l, "TIMEOUT") {
-		t.Errorf("match = %q %v", l, ok)
-	}
-	if l, ok := grepLine("x", nil); !ok || l != "x" {
-		t.Error("no pattern should pass everything")
-	}
-	rest, lo := splitLogFlags([]string{"--grep=err", "ctx", "--since=1h", "ns", "pod"})
-	if strings.Join(rest, " ") != "ctx ns pod" || lo.grep != "err" || lo.since != "1h" {
-		t.Errorf("split = %v %+v", rest, lo)
-	}
-	if _, err := (logOpts{grep: "("}).compile(); err == nil {
-		t.Error("bad regex accepted")
-	}
-}
-
 func TestCron(t *testing.T) {
 	at := func(s string) time.Time { v, _ := time.Parse("2006-01-02 15:04", s); return v }
 	cases := []struct {
@@ -299,24 +256,6 @@ func TestKreq(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("%q missing:\n%s", want, out)
 		}
-	}
-}
-
-func TestAddYAMLListItem(t *testing.T) {
-	item := "{ name: grafana, cluster: dal, namespace: monitoring, service: grafana, port: 3000 }"
-	cases := map[string]string{
-		"":                        "forwards:\n  - " + item + "\n",
-		"hide: []\n":              "hide: []\nforwards:\n  - " + item + "\n",
-		"forwards: []\nhide: x\n": "forwards:\n  - " + item + "\nhide: x\n",
-		"forwards:\n  - { name: a }\n# note\nhide: x\n": "forwards:\n  - { name: a }\n  - " + item + "\n# note\nhide: x\n",
-	}
-	for in, want := range cases {
-		if got := addYAMLListItem(in, "forwards", item); got != want {
-			t.Errorf("addYAMLListItem(%q)\n got %q\nwant %q", in, got, want)
-		}
-	}
-	if yamlScalar("grafana") != "grafana" || yamlScalar("a: b") != `"a: b"` {
-		t.Error("yamlScalar")
 	}
 }
 
@@ -398,26 +337,6 @@ func TestJunk(t *testing.T) {
 	}
 }
 
-func TestConfigEdits(t *testing.T) {
-	doc := "ai_language: pt-BR\ngitops_repos: [ ~/dev/GitOps ]   # repos\nhide:\n  - \"old\"\n  - other   # note\nlogin_url: x\n"
-	got := addYAMLFlowItem(doc, "gitops_repos", "~/dev/Infra")
-	if !strings.Contains(got, "gitops_repos: [ ~/dev/GitOps, ~/dev/Infra ]   # repos") {
-		t.Errorf("add flow:\n%s", got)
-	}
-	if addYAMLFlowItem(got, "gitops_repos", "~/dev/Infra") != got {
-		t.Error("add flow duplicated")
-	}
-	if got := removeYAMLListItem(doc, "gitops_repos", "~/dev/GitOps"); !strings.Contains(got, "gitops_repos: [  ]") && !strings.Contains(got, "gitops_repos: [ ]") {
-		t.Errorf("remove flow:\n%s", got)
-	}
-	if got := removeYAMLListItem(doc, "hide", "other"); strings.Contains(got, "other") || !strings.Contains(got, `"old"`) || !strings.Contains(got, "login_url: x") {
-		t.Errorf("remove block:\n%s", got)
-	}
-	if got := removeYAMLKey(doc, "hide"); strings.Contains(got, "hide") || strings.Contains(got, "old") || !strings.Contains(got, "login_url: x") {
-		t.Errorf("unset:\n%s", got)
-	}
-}
-
 func TestEditConfigRefusesConcurrentChange(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/config.yaml"
@@ -425,7 +344,7 @@ func TestEditConfigRefusesConcurrentChange(t *testing.T) {
 	t.Setenv("REX8S_CONFIG", path)
 	cfg, _ := config.Load()
 	a := &app{cfg: cfg}
-	if err := a.editConfig(func(doc string) string { return setYAMLKey(doc, "ai_language", "pt-BR") }); err != nil {
+	if err := a.editConfig(func(doc string) string { return yamledit.SetKey(doc, "ai_language", "pt-BR") }); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(path); string(b) != "ai_language: pt-BR\n" {
@@ -435,7 +354,7 @@ func TestEditConfigRefusesConcurrentChange(t *testing.T) {
 	err := a.editConfig(func(doc string) string {
 		future := time.Now().Add(time.Hour)
 		os.Chtimes(path, future, future)
-		return setYAMLKey(doc, "ai_language", "en")
+		return yamledit.SetKey(doc, "ai_language", "en")
 	})
 	if err == nil || !strings.Contains(err.Error(), "changed while") {
 		t.Errorf("concurrent edit not refused: %v", err)
@@ -456,5 +375,25 @@ func TestBrewStable(t *testing.T) {
 	}
 	if _, ok := brewStable("/Users/x/.config/rex/rex8s/bin/rex8s", "rex8s"); ok {
 		t.Error("not a brew path")
+	}
+}
+
+func TestConfigSetForwardExpire(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	os.WriteFile(path, []byte("ai_language: en\n"), 0o644)
+	t.Setenv("REX8S_CONFIG", path)
+	cfg, _ := config.Load()
+	a := &app{cfg: cfg}
+	if err := a.configCmd([]string{"set", "forward_expire", "2d"}); err == nil {
+		t.Error("forward_expire 2d accepted")
+	}
+	if err := a.configCmd([]string{"set", "forward_expire", "off"}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), `forward_expire: "off"`) {
+		t.Errorf("file = %q", b)
+	}
+	if d := a.cfg.ForwardExpiry(); d != 0 {
+		t.Errorf("expiry after set off = %v", d)
 	}
 }

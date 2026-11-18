@@ -96,8 +96,11 @@ guide ships in the binary, so it follows rex8s upgrades. With it, an agent
 answers "what changed?", "what's broken?", "which version runs where?" with
 `kwhat`, `rex8s list failing`, `kver`, `kdisk`… across every cluster, and
 knows the production rules: a `kubectl`/`helm`/`flux` command that changes a
-production cluster, run without a terminal (by any agent, or a script), is
-refused until you agree and it is re-run with `REX8S_FORCE=1`.
+production cluster (or one the guard doesn't know), or a rex8s command that
+does (`kroll`, `krun`, `kjunk`, `kexec`…), run by an agent or without a
+terminal (a script), is refused until you agree and it is
+re-run with `REX8S_FORCE=1`. Every decision is logged in
+`~/.cache/rex8s/audit.log`.
 `rex8s agents status` / `remove` take the same agent names.
 
 `kask` opens Claude Code or Codex: `rex8s setup` asks once when you have both

@@ -8,10 +8,10 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
@@ -34,7 +34,7 @@ func (a *app) monitor(args []string) error {
 	if err != nil {
 		return err
 	}
-	clusters := dedupe(kube.Contexts(raw, a.cfg))
+	clusters := fleet.All(raw, a.cfg)
 	cl, err := a.client(a.src)
 	if err != nil {
 		return err
@@ -46,10 +46,11 @@ func (a *app) monitor(args []string) error {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sig)
 
+	r := a.readerFor(cl)
 	prev := map[string]clusterHealth{}
 	first := true
 	for {
-		cur := pollAll(cl, clusters)
+		cur := pollAll(r, clusters)
 		draw(clusters, cur, *interval)
 		alert(clusters, prev, cur, first)
 		rex.RenameWindow(tabTitle(clusters, cur))
@@ -69,34 +70,35 @@ func (a *app) monitor(args []string) error {
 type clusterHealth struct {
 	installed bool
 	err       string
+	expired   bool // the login expired (err says so too)
 	items     []kube.FluxItem
 	failing   map[string]kube.FluxItem
 }
 
-func pollAll(cl kube.Client, clusters []kube.Context) map[string]clusterHealth {
-	var mu sync.Mutex
-	var wg sync.WaitGroup
+// pollAll reads Flux on every cluster, by context name. Keep r between
+// polls: it backs off clusters that do not answer.
+func pollAll(r *fleet.Reader, clusters []kube.Context) map[string]clusterHealth {
+	res := fleet.Read(r, clusters, [][]string{kube.FluxItemsQuery}, func(_ kube.Context, out [][]byte) ([][]kube.FluxItem, error) {
+		items, err := kube.ParseFluxItems(out[0])
+		return [][]kube.FluxItem{items}, err
+	})
 	out := map[string]clusterHealth{}
-	for _, c := range clusters {
-		wg.Add(1)
-		go func(c kube.Context) {
-			defer wg.Done()
-			items, installed, err := cl.FluxItems(c.Name)
-			h := clusterHealth{installed: installed, items: items, failing: map[string]kube.FluxItem{}}
-			if err != nil {
-				h.err = err.Error()
+	for _, row := range res.Rows {
+		h := clusterHealth{installed: true, items: row.V, failing: map[string]kube.FluxItem{}}
+		for _, it := range row.V {
+			if it.Failing() {
+				h.failing[it.Key()] = it
 			}
-			for _, it := range items {
-				if it.Failing() {
-					h.failing[it.Key()] = it
-				}
-			}
-			mu.Lock()
-			out[c.Name] = h
-			mu.Unlock()
-		}(c)
+		}
+		out[row.C.Name] = h
 	}
-	wg.Wait()
+	for _, s := range res.Skipped {
+		h := clusterHealth{failing: map[string]kube.FluxItem{}}
+		if !kube.NoFlux(s.Reason) {
+			h.err, h.expired = s.Reason, s.Expired
+		}
+		out[s.Cluster.Name] = h
+	}
 	return out
 }
 
@@ -112,6 +114,8 @@ func draw(clusters []kube.Context, cur map[string]clusterHealth, interval time.D
 		}
 		b.WriteString(fmt.Sprintf("%s %-8s ", tag, c.Short))
 		switch {
+		case h.expired:
+			b.WriteString(tui.Warn.Render("login expired") + tui.Dim.Render(" · run: kauth "+c.Short))
 		case h.err != "":
 			b.WriteString(accessError(c, errors.New(h.err)))
 		case !h.installed:
@@ -194,7 +198,7 @@ func alert(clusters []kube.Context, prev, cur map[string]clusterHealth, first bo
 		switch {
 		case h.err != "" && (first || p.err == ""):
 			msg := "no access: " + truncate(h.err, 120)
-			if kube.AuthExpired(errors.New(h.err)) {
+			if h.expired {
 				msg = "login expired · run kauth " + c.Short
 			}
 			rex.Notify("Flux · "+c.Short, msg)

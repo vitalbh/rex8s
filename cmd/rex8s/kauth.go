@@ -1,13 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/vitalbh/rex8s/internal/desktop"
 
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
@@ -25,7 +27,7 @@ func (a *app) kauth(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	c, err := a.resolveCluster(fs.Arg(0))
+	c, err := a.contextOrCurrent(fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -67,7 +69,9 @@ func (a *app) ensureLogin(cl kube.Client, c kube.Context) error {
 func (a *app) login(c kube.Context) error {
 	if url := a.cfg.Login(c.Server); url != "" {
 		fmt.Println("opening " + tui.Bold.Render(url))
-		_ = exec.Command("open", url).Run()
+		if desktop.CanOpen() {
+			_ = desktop.OpenURL(url)
+		}
 	} else {
 		fmt.Println(tui.Dim.Render("tip: set login_url in " + a.cfg.File() + " and kauth will open the login page for you"))
 	}
@@ -96,8 +100,8 @@ func (a *app) login(c kube.Context) error {
 		case stepWrite:
 			err = os.WriteFile(st.path, []byte(st.content), 0o600)
 		case stepKubectl:
-			cmd := exec.Command(bin, st.argv[1:]...)
-			cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src) // the master, never a pane file
+			// the master, never a pane file
+			cmd := kube.Client{Kubectl: bin, Kubeconfig: a.src}.Command(context.Background(), "", st.argv[1:]...)
 			if out, e := cmd.CombinedOutput(); e != nil {
 				err = errors.New(strings.TrimSpace(string(out)))
 			}
@@ -116,24 +120,12 @@ func (a *app) login(c kube.Context) error {
 	return nil
 }
 
-// resolveCluster finds a context by name or short name; "" = current context.
-func (a *app) resolveCluster(name string) (kube.Context, error) {
+// contextOrCurrent resolves name with fleet.Resolve; "" is the current context.
+func (a *app) contextOrCurrent(name string) (kube.Context, error) {
 	if name == "" {
 		return kube.Current(a.cfg, "", "")
 	}
-	raw, err := kube.Load(a.src)
-	if err != nil {
-		return kube.Context{}, err
-	}
-	if c, ok := kube.Find(raw, a.cfg, name); ok {
-		return c, nil
-	}
-	for _, c := range kube.Contexts(raw, a.cfg) {
-		if c.Short == name {
-			return c, nil
-		}
-	}
-	return kube.Context{}, fmt.Errorf("no context or cluster named %q", name)
+	return a.context(name)
 }
 
 // shellSplit splits a command line like a POSIX shell would for quoting

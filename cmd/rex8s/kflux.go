@@ -79,6 +79,9 @@ func (a *app) kflux() error {
 
 	switch act.Key {
 	case "reconcile":
+		if ok, err := confirmChange([]kube.Context{c}, fmt.Sprintf("kflux: reconcile %s %s/%s", f.Kind, f.Namespace, f.Name)); !ok {
+			return err
+		}
 		return reconcile(cl, c, f)
 	case "events":
 		fmt.Println(fluxEvents(cl, c.Name, f, 0))
@@ -161,15 +164,15 @@ func objectEvents(cl kube.Client, ctxName, ns, kind, name string, max int) strin
 	}
 	lines := make([]string, 0, len(evs))
 	for _, e := range evs {
-		reason := tui.Ok.Render(e.Reason)
+		reason := tui.Ok.Render(tui.Clean(e.Reason))
 		if e.Type == "Warning" {
-			reason = tui.Warn.Render(e.Reason)
+			reason = tui.Warn.Render(tui.Clean(e.Reason))
 		}
 		count := ""
 		if e.Count > 1 {
 			count = tui.Dim.Render(fmt.Sprintf(" (x%d)", e.Count))
 		}
-		lines = append(lines, tui.Dim.Render(fmt.Sprintf("%-4s ", age(e.When)))+reason+count+" "+truncate(oneLine(e.Message), 300))
+		lines = append(lines, tui.Dim.Render(fmt.Sprintf("%-4s ", kube.Age(e.When)))+reason+count+" "+truncate(oneLine(tui.Clean(e.Message)), 300))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -265,10 +268,7 @@ func (a *app) runKubectl(guarded bool, args ...string) error {
 			return err
 		}
 	}
-	cmd := exec.Command(bin, args...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", a.src)
-	err := cmd.Run()
+	err := kube.Client{Kubectl: bin, Kubeconfig: a.src}.Run("", args...) // args carry --context
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		os.Exit(ee.ExitCode()) // kubectl/guard already printed why

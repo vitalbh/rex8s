@@ -2,7 +2,7 @@
 //
 //	rex8s pick [tab|layout]   cluster + namespace picker (floating popup)
 //	rex8s pane CTX [NS]       isolated shell: KUBECONFIG scoped to this pane
-//	rex8s k9s CTX [NS]        k9s
+//	rex8s browser CTX [NS]    kview (or k9s, cluster_browser); k9s is an alias
 //	rex8s events CTX [NS]     kubectl get events -w
 //	rex8s switch [CTX]        switch this pane's cluster (kctx)
 //	rex8s ns [NS]             switch this pane's namespace (kns)
@@ -13,7 +13,7 @@
 //	rex8s logs [FILTER]       pick a pod and follow its logs in a split (klogs)
 //	rex8s monitor             Flux dashboard + notifications for every cluster
 //	rex8s fdiff [-A] [FILTER] preview what the local repo would change (flux diff)
-//	rex8s kpf [FILTER]        pick a service and port-forward it in a split
+//	rex8s kpf [FILTER]        pick a service and port-forward it in the background
 //	rex8s kauth [CLUSTER]     log in again when the credentials expired
 package main
 
@@ -31,11 +31,14 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
 
 	"github.com/vitalbh/rex8s/internal/config"
 	"github.com/vitalbh/rex8s/internal/demo"
+	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/guard"
 	"github.com/vitalbh/rex8s/internal/kube"
+	"github.com/vitalbh/rex8s/internal/logstream"
 	"github.com/vitalbh/rex8s/internal/pathx"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
@@ -72,7 +75,7 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, tui.Err.Render("rex8s: "+err.Error()))
-		if cmd == "pick" || cmd == "pane" || cmd == "k9s" || cmd == "events" || cmd == "logtail" || cmd == "pftail" || cmd == "exectail" || cmd == "warnings" || cmd == "whytail" || cmd == "monitor" || cmd == "nodetail" || cmd == "asktail" || cmd == "askpod" || cmd == "nettail" || cmd == "wlogtail" || cmd == "fwd" {
+		if cmd == "pick" || cmd == "pane" || cmd == "browser" || cmd == "k9s" || cmd == "events" || cmd == "logtail" || cmd == "exectail" || cmd == "warnings" || cmd == "whytail" || cmd == "monitor" || cmd == "nodetail" || cmd == "asktail" || cmd == "askpod" || cmd == "nettail" || cmd == "wlogtail" || cmd == "fwd" {
 			// runs in a pane that would close immediately: wait so the error can be read
 			fmt.Fprint(os.Stderr, tui.Dim.Render("press enter to close"))
 			bufio.NewReader(os.Stdin).ReadString('\n')
@@ -97,6 +100,11 @@ func newApp() (*app, error) {
 		return nil, err
 	}
 	rex.Notifications = cfg.NotificationsOn()
+	if term.IsTerminal(int(os.Stderr.Fd())) {
+		for _, w := range cfg.Warnings {
+			fmt.Fprintln(os.Stderr, tui.Warn.Render("rex8s: "+tildePath(cfg.File())+": "+w))
+		}
+	}
 	src := os.Getenv("REX8S_SOURCE")
 	if src == "" {
 		src = cfg.KubeconfigPath()
@@ -150,9 +158,12 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.pane(args[0], arg(1), layout)
 	case "restore":
 		return a.restore()
-	case "k9s", "events":
+	case "browser", "k9s", "events": // k9s: the old name of browser (layouts saved before)
 		if err := need(1); err != nil {
 			return err
+		}
+		if cmd == "k9s" {
+			cmd = "browser"
 		}
 		return a.tool(cmd, args[0], arg(1))
 	case "switch":
@@ -208,10 +219,10 @@ func (a *app) dispatch(cmd string, args []string) error {
 	case "kgrep":
 		return a.kgrep(args)
 	case "wlogtail":
-		rest, lo := splitLogFlags(args)
+		rest, lo := logstream.SplitFlags(args)
 		return a.wlogtail(rest, lo)
 	case "logtail":
-		rest, lo := splitLogFlags(args)
+		rest, lo := logstream.SplitFlags(args)
 		if len(rest) < 3 {
 			return fmt.Errorf("logtail: missing arguments (see rex8s help)")
 		}
@@ -244,6 +255,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.kjobs(args)
 	case "kpods":
 		return a.kpods(args)
+	case "kview":
+		return a.kview(args)
 	case "kfail":
 		if len(args) > 0 && args[0] == "-A" { // kpods failing
 			return a.kpods(append([]string{"failing"}, args[1:]...))
@@ -313,11 +326,6 @@ func (a *app) dispatch(cmd string, args []string) error {
 			return err
 		}
 		return a.warnings(args[0], arg(1))
-	case "pftail":
-		if err := need(4); err != nil {
-			return err
-		}
-		return a.pftail(args[0], args[1], args[2], args[3])
 	case "version":
 		fmt.Println(version)
 		return nil
@@ -334,7 +342,7 @@ func usage() {
 
   rex8s pick [tab|layout]   cluster + namespace picker
   rex8s pane CTX [NS]       isolated shell on the cluster
-  rex8s k9s CTX [NS]        k9s
+  rex8s browser CTX [NS]    kview on the cluster (k9s with cluster_browser: k9s; alias: k9s)
   rex8s events CTX [NS]     kubectl get events -w
   rex8s switch [CTX]        switch this pane's cluster   (kctx)
   rex8s ns [NS|all]         switch this pane's namespace (kns; all = every namespace)
@@ -345,7 +353,7 @@ func usage() {
   rex8s logs [FILTER]       pick a pod, follow its logs in a split      (klogs)
   rex8s monitor             Flux dashboard + notifications, all clusters
   rex8s fdiff [-A] [FILTER] preview what the local repo would change    (fdiff)
-  rex8s kpf [FILTER]        pick a service, port-forward it in a split  (kpf)
+  rex8s kpf [FILTER]        pick a service, port-forward it in the background, print the URL (kpf)
   rex8s kauth [CLUSTER]     log in again when the credentials expired   (kauth)
   rex8s kexec [FILTER]      pick a pod, open a shell in it in a split    (kexec)
   rex8s kwarn [-n]          stream Warning events only                    (kwarn)
@@ -376,7 +384,7 @@ func usage() {
   rex8s kroll [FILTER]      restart the workloads you mark, follow the rollouts (kroll)
   rex8s kdiff [FILTER]      compare a workload's spec between two clusters  (kdiff)
   rex8s knode [FILTER]      pick a node, open a shell on it in a split      (knode)
-  rex8s kpf -l              running port-forwards: open, copy, stop
+  rex8s kpf -l              running port-forwards: open, copy, save, stop (--gc: clean up after dead ones)
   rex8s kpf NAME | -f       a favorite forward (config forwards): start it, open the browser
   rex8s kstatus [-w]        cluster health on one screen (-w: refresh)     (kstatus)
   rex8s kjobs [-n] [STATE] [FILTER]  Jobs and CronJobs; STATE: failed|running|done|suspended|cron (kjobs)
@@ -401,16 +409,13 @@ func (a *app) client(kubeconfig string) (kube.Client, error) {
 	return kube.Client{Kubectl: k, Kubeconfig: kubeconfig}, err
 }
 
+// context resolves a context or short name with fleet.Resolve.
 func (a *app) context(name string) (kube.Context, error) {
 	raw, err := kube.Load(a.src)
 	if err != nil {
 		return kube.Context{}, err
 	}
-	c, ok := kube.Find(raw, a.cfg, name)
-	if !ok {
-		return kube.Context{}, fmt.Errorf("context %q not found in %s", name, a.src)
-	}
-	return c, nil
+	return fleet.Resolve(raw, a.cfg, name)
 }
 
 func labelText(c kube.Context, ns string) string {
@@ -706,7 +711,7 @@ func (a *app) pick(mode string) error {
 	if mode != "layout" {
 		return a.pane(c.Name, ns, false)
 	}
-	// layout: this block becomes k9s (left); shell on the right, warnings below it
+	// layout: this block becomes the browser (left: kview, or k9s); shell on the right, warnings below it
 	self := filepath.Join(a.binDir, "rex8s")
 	shellArgv := []string{self, "pane", "--layout", c.Name}
 	warnArgv := []string{self, "warnings", c.Name}
@@ -721,7 +726,7 @@ func (a *app) pick(mode string) error {
 	if _, err := rex.SplitBlock(shell, "below", 35, false, "warnings", warnArgv...); err != nil {
 		return err
 	}
-	return a.tool("k9s", c.Name, ns)
+	return a.tool("browser", c.Name, ns)
 }
 
 func (a *app) pane(ctxName, ns string, layout bool) error {
@@ -794,6 +799,16 @@ func (a *app) tool(which, ctxName, ns string) error {
 	c, err := a.context(ctxName)
 	if err != nil {
 		return err
+	}
+	if which == "browser" && !a.cfg.UseK9s() { // kview, unless cluster_browser: k9s
+		o := kviewOpts{ctxName: ctxName, ns: ns} // kview labels the pane: "kview PROD use/ns"
+		if ns != "" && ns != kube.AllNamespaces {
+			o.filter = ns + "/"
+		}
+		return a.runKview(o)
+	}
+	if which == "browser" {
+		which = "k9s"
 	}
 	rex.Rename(which + " " + labelText(c, ns))
 	a.tint(c)

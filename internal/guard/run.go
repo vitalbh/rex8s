@@ -1,22 +1,26 @@
 package guard
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
-	"syscall"
 
-	"golang.org/x/term"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/vitalbh/rex8s/internal/config"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/pathx"
 )
 
-// Run executes tool (kubectl/helm/flux), asking for confirmation when the
-// command mutates a production cluster. Without a TTY (agents, scripts) such
-// a command is refused; REX8S_FORCE=1 lets it through.
+// errExit: the reason was already printed; exit 1.
+var errExit = errors.New("exit 1")
+
+// Run executes tool (kubectl/helm/flux) under the production policy (see
+// policy.go): a command that changes a production cluster, or one the guard
+// can't classify, asks first; without a terminal it is refused; REX8S_FORCE=1
+// lets it through.
 //
 // It lives outside the TUI binary on purpose: Bubble Tea's init() queries the
 // terminal background color and can block for up to 5s on terminals that
@@ -26,77 +30,115 @@ func Run(tool string, args []string, skipDir string, cfg *config.Config) error {
 	if bin == "" {
 		return fmt.Errorf("%s not found in PATH", tool)
 	}
-	run := func() error { return syscall.Exec(bin, append([]string{tool}, args...), os.Environ()) }
-
-	// a pane showing every namespace: reads get -A, the rest needs -n
-	if p0 := Parse(args); true {
-		if c, err := kube.Current(cfg, p0.Context, p0.Kubeconfig); err == nil && c.AllNS {
-			adapted, msg := AllNamespacesArgs(tool, p0, args)
-			if msg != "" {
-				fmt.Fprintln(os.Stderr, "rex8s: "+msg)
-				os.Exit(1)
-			}
-			args = adapted
-		}
-	}
-	if os.Getenv("REX8S_FORCE") != "" {
-		return run()
-	}
-	// Nobody at a terminal to confirm: an agent (Claude Code sets CLAUDECODE,
-	// kask sets REX8S_AGENT; Codex, Cursor and scripts have no TTY). A change
-	// to production is refused instead of passing silently.
-	unattended := os.Getenv("REX8S_AGENT") != "" || os.Getenv("CLAUDECODE") == "1" || !term.IsTerminal(int(os.Stdin.Fd()))
-	p := Parse(args)
-	if !Risky(tool, p) {
-		return run()
-	}
-	c, err := kube.Current(cfg, p.Context, p.Kubeconfig)
-	if err != nil || !c.Prod {
-		return run()
-	}
-	if unattended {
-		fmt.Fprintf(os.Stderr, "rex8s guard: refused: %s %s would change the PRODUCTION cluster %s, and there is no terminal to confirm it.\n"+
-			"An agent: ask the user first; only if they agree to this exact change, run it again prefixed with REX8S_FORCE=1.\n"+
-			"A script: prefix it with REX8S_FORCE=1.\n",
-			tool, strings.Join(args, " "), c.Short)
+	err := run(tool, bin, args, cfg)
+	switch {
+	case errors.Is(err, ErrRefused):
+		fmt.Fprintln(sys.stderr, "rex8s guard: "+err.Error())
+		os.Exit(1)
+	case errors.Is(err, ErrCancelled), errors.Is(err, errExit):
 		os.Exit(1)
 	}
+	return err
+}
 
+func run(tool, bin string, args []string, cfg *config.Config) error {
+	p := Parse(tool, args)
+	c, cerr := Target(cfg, tool, p)
+
+	// a pane showing every namespace: reads get -A, the rest needs -n
+	if cerr == nil && c.AllNS {
+		adapted, msg := AllNamespacesArgs(tool, p, args)
+		if msg != "" {
+			fmt.Fprintln(sys.stderr, "rex8s: "+msg)
+			return errExit
+		}
+		args = adapted
+	}
+	exec := func() error { return sys.exec(bin, append([]string{tool}, args...)) }
+
+	risk := Classify(tool, p)
+	// not production, or a kubeconfig/context kubectl itself will fail on
+	if risk == Safe || cerr != nil || !c.Prod {
+		return exec()
+	}
 	var notes []string
+	if risk == Unknown {
+		notes = append(notes, "rex8s doesn't know this command (or a flag before it), so it asks as for a change.")
+	}
 	if FluxReverts(tool, p) {
 		notes = append(notes, "reminder: with Flux, manual changes to managed resources are reverted on the next reconcile.")
 	}
-	if !Confirm(c.Short, tool+" "+strings.Join(args, " "), notes...) {
-		os.Exit(1)
+	if err := decide([]string{c.Short}, tool+" "+strings.Join(args, " "), risk == Unknown, notes...); err != nil {
+		return err
 	}
-	return run()
+	return exec()
 }
 
-// Confirm shows the red PRODUCTION banner for cluster short and asks the user
-// to type its name. It reads from /dev/tty, so it works even with stdin
-// redirected. Returns false (after printing "cancelled.") on any other answer.
-func Confirm(short, what string, notes ...string) bool {
-	color := term.IsTerminal(int(os.Stderr.Fd()))
-	paint := func(code, s string) string {
-		if !color {
-			return s
+// Target resolves the cluster a command acts on, and whether it is
+// production. The context comes from --context/--kube-context (helm:
+// HELM_KUBECONTEXT), else the kubeconfig's current one; then --cluster and
+// --server (helm: --kube-apiserver, HELM_KUBEAPISERVER) can point it at
+// another server, which decides production. --user naming the credentials of
+// a production context counts as production too.
+func Target(cfg *config.Config, tool string, p Parsed) (kube.Context, error) {
+	name, server := p.Context, p.Server
+	if tool == "helm" {
+		if name == "" {
+			name = sys.getenv("HELM_KUBECONTEXT")
 		}
-		return "\x1b[" + code + "m" + s + "\x1b[0m"
+		if server == "" {
+			server = sys.getenv("HELM_KUBEAPISERVER")
+		}
 	}
-	fmt.Fprintln(os.Stderr, paint("1;97;41", " PRODUCTION ("+short+") ")+" "+what)
-	for _, n := range notes {
-		fmt.Fprintln(os.Stderr, paint("38;5;214", "   "+n))
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if p.Kubeconfig != "" {
+		rules.ExplicitPath = p.Kubeconfig
 	}
-	fmt.Fprintf(os.Stderr, "   type '%s' to confirm: ", short)
-	tty, err := os.Open("/dev/tty")
+	raw, err := rules.Load()
 	if err != nil {
-		return false
+		return kube.Context{}, err
 	}
-	defer tty.Close()
-	ans, _ := bufio.NewReader(tty).ReadString('\n')
-	if strings.TrimSpace(ans) != short {
-		fmt.Fprintln(os.Stderr, "cancelled.")
-		return false
+	if name == "" {
+		name = raw.CurrentContext
 	}
-	return true
+	c, ok := kube.Find(raw, cfg, name)
+	if !ok {
+		if p.Cluster == "" && server == "" {
+			return kube.Context{}, fmt.Errorf("context %q not found", name)
+		}
+		c = kube.Context{Name: name}
+	}
+
+	eff := c.Server
+	if cl := raw.Clusters[p.Cluster]; p.Cluster != "" && cl != nil {
+		eff = cl.Server
+	}
+	if server != "" {
+		eff = server
+	}
+	if eff != c.Server || !ok {
+		label := name
+		if label == "" {
+			label = p.Cluster
+		}
+		c.Server = eff
+		c.Short, c.Prod = cfg.Lookup(eff, label)
+	}
+
+	if p.User != "" && !c.Prod {
+		var names []string
+		for n, kc := range raw.Contexts {
+			if kc.AuthInfo == p.User {
+				names = append(names, n)
+			}
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			if d, _ := kube.Find(raw, cfg, n); d.Prod {
+				c.Prod, c.Short = true, d.Short
+				break
+			}
+		}
+	}
+	return c, nil
 }

@@ -34,7 +34,7 @@ func (it FluxItem) AsWorkload() Workload {
 	w := Workload{Kind: it.Kind, Namespace: it.Namespace, Name: it.Name, Generation: it.Generation,
 		Observed: it.Observed, Desired: 1, Updated: 1, KsName: it.KsName, KsNamespace: it.KsNamespace}
 	if it.Ready == "True" {
-		w.Ready = 1
+		w.Ready, w.Available = 1, 1
 	}
 	if it.Ready == "False" && it.Observed >= it.Generation {
 		w.Failed, w.Message = true, it.Message
@@ -223,9 +223,9 @@ func ParseFlux(data []byte) (FluxStatus, error) {
 // revision, so it must be checked too). installed is false when the Flux CRDs
 // are missing.
 func (k Client) FluxItems(ctxName string) (items []FluxItem, installed bool, err error) {
-	out, err := k.run(ctxName, "get", KustomizationRes+","+HelmReleaseRes+","+GitRepositoryRes, "-A", "-o", "json")
+	out, err := k.Get(ctxName, FluxItemsQuery...)
 	if err != nil {
-		if strings.Contains(err.Error(), "doesn't have a resource type") {
+		if NoFlux(err.Error()) {
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -233,6 +233,14 @@ func (k Client) FluxItems(ctxName string) (items []FluxItem, installed bool, err
 	items, err = ParseFluxItems(out)
 	return items, err == nil, err
 }
+
+// FluxItemsQuery is the kubectl read behind FluxItems; its output goes to
+// ParseFluxItems.
+var FluxItemsQuery = []string{"get", KustomizationRes + "," + HelmReleaseRes + "," + GitRepositoryRes, "-A", "-o", "json"}
+
+// NoFlux reports whether a kubectl error message means the cluster has no
+// Flux CRDs (Flux is not installed), as opposed to a failed read.
+func NoFlux(msg string) bool { return strings.Contains(msg, "doesn't have a resource type") }
 
 // Flux summarizes the cluster's Flux resources.
 func (k Client) Flux(ctxName string) (FluxStatus, error) {
@@ -267,7 +275,7 @@ func ParseGitRepos(data []byte) ([]GitRepo, error) {
 }
 
 func (k Client) GitRepos(ctxName string) ([]GitRepo, error) {
-	out, err := k.run(ctxName, "get", GitRepositoryRes, "-A", "-o", "json")
+	out, err := k.Get(ctxName, "get", GitRepositoryRes, "-A", "-o", "json")
 	if err != nil {
 		return nil, err
 	}

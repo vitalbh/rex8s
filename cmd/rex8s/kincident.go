@@ -42,7 +42,7 @@ func (a *app) kincident(args []string) error {
 	var c kube.Context
 	var err error
 	if name != "" {
-		c, err = a.clusterContext(name)
+		c, err = a.context(name)
 	} else {
 		c, err = kube.Current(a.cfg, "", "")
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
+	"github.com/vitalbh/rex8s/internal/yamledit"
 )
 
 // tintPresets: dark backgrounds that keep normal text readable.
@@ -151,49 +152,10 @@ func (a *app) saveTint(color string) error {
 	if os.Getenv("REX8S_DEMO") != "" && !strings.HasPrefix(a.configPath(), os.Getenv("REX8S_DEMO")) {
 		return errors.New("demo mode: not touching the real config")
 	}
-	if err := a.editConfig(func(doc string) string { return setYAMLKey(doc, "prod_background", fmt.Sprintf("%q", color)) }); err != nil {
+	if err := a.editConfig(func(doc string) string { return yamledit.SetKey(doc, "prod_background", fmt.Sprintf("%q", color)) }); err != nil {
 		return err
 	}
 	a.reapplyTint()
 	fmt.Println(tui.Dim.Render("new production panes use " + color + "; in open ones run rex8s label (or kctx)"))
 	return nil
-}
-
-// setYAMLKey replaces a top-level "key: …" line (keeping its comment), or
-// appends one.
-func setYAMLKey(doc, key, value string) string {
-	lines := strings.Split(doc, "\n")
-	for i, l := range lines {
-		if !strings.HasPrefix(l, key+":") {
-			continue
-		}
-		line := key + ": " + value
-		if c := yamlComment(l); c != "" {
-			line = fmt.Sprintf("%-42s %s", line, c)
-		}
-		lines[i] = line
-		return strings.Join(lines, "\n")
-	}
-	if doc != "" && !strings.HasSuffix(doc, "\n") {
-		doc += "\n"
-	}
-	return doc + key + ": " + value + "\n"
-}
-
-// yamlComment: the "# …" of a line, outside quotes ("" when none).
-func yamlComment(l string) string {
-	var quote rune
-	for i, r := range l {
-		switch {
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			}
-		case r == '"' || r == '\'':
-			quote = r
-		case r == '#' && i > 0 && (l[i-1] == ' ' || l[i-1] == '\t'):
-			return l[i:]
-		}
-	}
-	return ""
 }

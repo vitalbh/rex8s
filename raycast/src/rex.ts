@@ -199,7 +199,7 @@ export async function saveFavorite(pid: number): Promise<string> {
   return (await run(prefs().rexK8s, ["kpf", "--save", String(pid)])).trim();
 }
 
-/** Stops a running port-forward (its Rex pane closes). */
+/** Stops a running background port-forward (frees its local port). */
 export async function stopPortForward(pid: number): Promise<void> {
   await run(prefs().rexK8s, ["kpf", "--stop", String(pid)]);
 }

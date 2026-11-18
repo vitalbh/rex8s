@@ -3,18 +3,19 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os/exec"
-	"strconv"
 	"strings"
 
 	"github.com/vitalbh/rex8s/internal/config"
+	"github.com/vitalbh/rex8s/internal/desktop"
+	"github.com/vitalbh/rex8s/internal/forward"
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/tui"
+	"github.com/vitalbh/rex8s/internal/yamledit"
 )
 
-// Favorite port-forwards (config "forwards"): kpf NAME starts one in a
-// split and opens the browser when the port answers; when it already runs,
-// only the browser opens. kpf -f picks one.
+// Favorite port-forwards (config "forwards"): kpf NAME starts one in the
+// background and opens the browser; when it already runs, only the browser
+// opens. kpf -f picks one.
 
 func (a *app) favorite(name string) (config.Forward, bool) {
 	for _, f := range a.cfg.Forwards {
@@ -25,51 +26,27 @@ func (a *app) favorite(name string) (config.Forward, bool) {
 	return config.Forward{}, false
 }
 
-// clusterContext resolves a short name or a context name.
-func (a *app) clusterContext(name string) (kube.Context, error) {
-	raw, err := kube.Load(a.src)
-	if err != nil {
-		return kube.Context{}, err
-	}
-	for _, c := range kube.Contexts(raw, a.cfg) {
-		if c.Name == name {
-			return c, nil
-		}
-	}
-	for _, c := range kube.Contexts(raw, a.cfg) {
-		if c.Short == name {
-			return c, nil
-		}
-	}
-	return kube.Context{}, fmt.Errorf("cluster %q not found (short name or context)", name)
-}
-
 // running returns the port-forward already serving this favorite.
-func (a *app) runningForward(f config.Forward, c kube.Context) (pfEntry, bool) {
-	for _, e := range a.pfList() {
-		if e.Context == c.Name && e.Namespace == f.Namespace && e.Service == f.Service && e.Remote == f.Port {
-			return e, true
-		}
-	}
-	return pfEntry{}, false
+func (a *app) runningForward(f config.Forward, c kube.Context) (forward.Entry, bool) {
+	return a.registry().Find(c.Name, nsOr(f.Namespace), f.Service, f.Port)
 }
 
 // favKind: what a favorite speaks — the web unless its port is a known
 // database or broker (favorites were made for web UIs; a path means web).
-func favKind(f config.Forward) portKind {
+func favKind(f config.Forward) forward.Kind {
 	if f.Path != "" {
-		return kindHTTP
+		return forward.KindHTTP
 	}
-	if k := detectKind(svcPort{Port: f.Port}); k != kindTCP {
+	if k := detectKind(kube.ServicePort{Port: f.Port}); k != forward.KindTCP {
 		return k
 	}
-	return kindHTTP
+	return forward.KindHTTP
 }
 
 // favoriteURL: favURL for the web, the client URL (postgres://…) otherwise.
 func favoriteURL(f config.Forward, local int) string {
-	if k := favKind(f); !k.web() {
-		return k.url(local)
+	if k := favKind(f); !k.Web() {
+		return k.URL(local)
 	}
 	return favURL(local, f.Path)
 }
@@ -92,7 +69,7 @@ func (a *app) fwd(name string) error {
 	if !ok {
 		return fmt.Errorf("no favorite forward %q in %s", name, a.cfg.File())
 	}
-	c, err := a.clusterContext(f.Cluster)
+	c, err := a.context(f.Cluster)
 	if err != nil {
 		return err
 	}
@@ -100,7 +77,7 @@ func (a *app) fwd(name string) error {
 		return errors.New("forward " + name + ": service and port are required")
 	}
 	kind := favKind(f)
-	e, reused, err := a.lazyEnsure(c, nsOr(f.Namespace), f.Service, svcPort{Port: f.Port, Protocol: "TCP", Name: string(kind)}, f.Local)
+	e, reused, err := a.lazyEnsure(c, nsOr(f.Namespace), f.Service, kube.ServicePort{Port: f.Port, Protocol: "TCP", Name: string(kind)}, f.Local)
 	if err != nil {
 		return err
 	}
@@ -110,13 +87,16 @@ func (a *app) fwd(name string) error {
 	} else {
 		fmt.Println(tui.Bold.Render(f.Name) + " → " + tui.Ok.Render(url) + tui.Dim.Render("  (kubectl connects on first use)"))
 	}
-	if !kind.web() { // a database: nothing to open; the client command helps
-		if cl := kind.client(e.Local); cl != "" {
+	if !kind.Web() { // a database: nothing to open; the client command helps
+		if cl := kind.Client(e.Local); cl != "" {
 			fmt.Println("  " + cl)
 		}
 		return nil
 	}
-	return exec.Command("open", url).Run()
+	if !desktop.CanOpen() {
+		return nil // the URL is printed above
+	}
+	return desktop.OpenURL(url)
 }
 
 // kpfFavorites: picker of the favorites (running ones marked).
@@ -131,7 +111,7 @@ func (a *app) kpfFavorites() error {
 	var items []tui.Item
 	for _, f := range a.cfg.Forwards {
 		badge := ""
-		if c, err := a.clusterContext(f.Cluster); err == nil {
+		if c, err := a.context(f.Cluster); err == nil {
 			if _, ok := a.runningForward(f, c); ok {
 				badge = "ON"
 			}
@@ -164,8 +144,8 @@ func (a *app) favoritesJSON() []favoriteJSON {
 	out := []favoriteJSON{}
 	for _, f := range a.cfg.Forwards {
 		j := favoriteJSON{Name: f.Name, Cluster: f.Cluster, Namespace: nsOr(f.Namespace), Service: f.Service, Port: f.Port,
-			Web: favKind(f).web()}
-		if c, err := a.clusterContext(f.Cluster); err == nil {
+			Web: favKind(f).Web()}
+		if c, err := a.context(f.Cluster); err == nil {
 			j.Prod = c.Prod
 			if e, ok := a.runningForward(f, c); ok {
 				j.Running, j.URL = true, favoriteURL(f, e.Local)
@@ -178,7 +158,7 @@ func (a *app) favoritesJSON() []favoriteJSON {
 
 // saveFavorite adds a running forward to config.yaml's forwards (name
 // defaults to the service; taken names get the cluster appended).
-func (a *app) saveFavorite(e pfEntry, name string) (string, error) {
+func (a *app) saveFavorite(e forward.Entry, name string) (string, error) {
 	if name == "" {
 		name = e.Service
 	}
@@ -191,84 +171,18 @@ func (a *app) saveFavorite(e pfEntry, name string) (string, error) {
 		}
 	}
 	for _, f := range a.cfg.Forwards {
-		if c, err := a.clusterContext(f.Cluster); err == nil && c.Name == e.Context && f.Namespace == e.Namespace && f.Service == e.Service && f.Port == e.Remote {
+		if c, err := a.context(f.Cluster); err == nil && c.Name == e.Context && f.Namespace == e.Namespace && f.Service == e.Service && f.Port == e.Remote {
 			return f.Name, fmt.Errorf("already a favorite: %s", f.Name)
 		}
 	}
 	item := fmt.Sprintf("{ name: %s, cluster: %s, namespace: %s, service: %s, port: %d",
-		yamlScalar(name), yamlScalar(e.Short), yamlScalar(e.Namespace), yamlScalar(e.Service), e.Remote)
+		yamledit.String(name), yamledit.String(e.Short), yamledit.String(e.Namespace), yamledit.String(e.Service), e.Remote)
 	if e.Local != e.Remote {
 		item += fmt.Sprintf(", local: %d", e.Local)
 	}
 	item += " }"
-	if err := a.editConfig(func(doc string) string { return addYAMLListItem(doc, "forwards", item) }); err != nil {
+	if err := a.editConfig(func(doc string) string { return yamledit.AddListItem(doc, "forwards", item) }); err != nil {
 		return "", err
 	}
 	return name, nil
-}
-
-// yamlScalar quotes a value when YAML would read it as something else.
-func yamlScalar(s string) string {
-	if s == "" || strings.ContainsAny(s, ":#{}[],&*!|>'\"%@`") || strings.TrimSpace(s) != s {
-		return strconv.Quote(s)
-	}
-	return s
-}
-
-// addYAMLListItem appends "  - item" to the top-level list key, keeping the
-// rest of the file (and its comments) as it is. Handles a missing key, an
-// empty inline list (key: []) and a block list.
-func addYAMLListItem(doc, key, item string) string {
-	lines := strings.Split(strings.TrimRight(doc, "\n"), "\n")
-	if doc == "" {
-		lines = nil
-	}
-	start := -1
-	for i, l := range lines {
-		if strings.HasPrefix(l, key+":") {
-			start = i
-			break
-		}
-	}
-	entry := "  - " + item
-	if start < 0 {
-		return strings.Join(append(lines, key+":", entry), "\n") + "\n"
-	}
-	rest := strings.TrimSpace(strings.TrimPrefix(lines[start], key+":"))
-	if c := yamlComment(lines[start]); c != "" {
-		rest = strings.TrimSpace(strings.TrimSuffix(rest, c))
-	}
-	if rest == "[]" || rest == "" {
-		if rest == "[]" {
-			lines[start] = key + ":"
-		}
-		end := start
-		for i := start + 1; i < len(lines); i++ {
-			l := lines[i]
-			if strings.TrimSpace(l) == "" || strings.HasPrefix(l, " ") || strings.HasPrefix(l, "-") || strings.HasPrefix(l, "#") {
-				if strings.TrimSpace(l) != "" && !strings.HasPrefix(strings.TrimSpace(l), "#") {
-					end = i
-				}
-				continue
-			}
-			break
-		}
-		out := append([]string{}, lines[:end+1]...)
-		out = append(out, entry)
-		out = append(out, lines[end+1:]...)
-		return strings.Join(out, "\n") + "\n"
-	}
-	// an inline list with items: leave it alone, add a block list after it
-	// would duplicate the key — rewrite the line as a block instead
-	inner := strings.TrimSuffix(strings.TrimPrefix(rest, "["), "]")
-	lines[start] = key + ":"
-	var add []string
-	if strings.TrimSpace(inner) != "" {
-		add = append(add, "  - "+strings.TrimSpace(inner))
-	}
-	add = append(add, entry)
-	out := append([]string{}, lines[:start+1]...)
-	out = append(out, add...)
-	out = append(out, lines[start+1:]...)
-	return strings.Join(out, "\n") + "\n"
 }
