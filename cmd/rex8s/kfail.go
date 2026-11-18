@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -51,8 +49,7 @@ func (a *app) kfail(args []string) error {
 	}
 	pause := func() {
 		if wait {
-			fmt.Fprint(os.Stderr, tui.Dim.Render("\npress enter to close"))
-			bufio.NewReader(os.Stdin).ReadString('\n')
+			waitClose("")
 		}
 	}
 	cl, err := a.client(a.src)
@@ -129,9 +126,9 @@ func (a *app) podAction(c kube.Context, cl kube.Client, p kube.Pod, pause func()
 		if err != nil || !ok {
 			return err
 		}
-		verb := "logtail"
+		verb := "_logs"
 		if act.Key == "shell" {
-			verb = "exectail"
+			verb = "_exec"
 		}
 		if !inRex {
 			if act.Key == "shell" {
@@ -158,12 +155,12 @@ func (a *app) podAction(c kube.Context, cl kube.Client, p kube.Pod, pause func()
 		if !inRex {
 			return a.whytail(c.Name, p.Namespace, p.Name)
 		}
-		return rex.SplitBehind("why "+p.Name, self, "whytail", c.Name, p.Namespace, p.Name)
+		return rex.SplitBehind("why "+p.Name, self, "_why", c.Name, p.Namespace, p.Name)
 	case "ask":
 		if !inRex {
 			return a.askpod(c.Name, p.Namespace, p.Name)
 		}
-		return rex.Split("ask "+p.Name, self, "askpod", c.Name, p.Namespace, p.Name)
+		return rex.Split("ask "+p.Name, self, "_askpod", c.Name, p.Namespace, p.Name)
 	case "describe":
 		defer pause()
 		return a.runKubectl(false, "--context", c.Name, "-n", p.Namespace, "describe", "pod", p.Name)
@@ -260,21 +257,4 @@ func failBody(cl kube.Client, ctxName string, p kube.Pod) string {
 		parts = append(parts, tui.Bold.Render("logs"), logTail(string(out)))
 	}
 	return strings.Join(parts, "\n\n")
-}
-
-// logTail keeps the last failLogLines lines, each cut to a sane width.
-func logTail(s string) string {
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	if len(lines) > failLogLines {
-		lines = lines[len(lines)-failLogLines:]
-	}
-	for i, l := range lines {
-		lines[i] = truncate(strings.ReplaceAll(l, "\t", "  "), 220)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func lastLogLine(s string) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	return lines[len(lines)-1]
 }

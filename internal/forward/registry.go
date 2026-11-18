@@ -17,7 +17,7 @@ import (
 	"github.com/vitalbh/rex8s/internal/kube"
 )
 
-// Each background forward (pfbg) leaves a file in the registry directory
+// Each background forward (rex8s _pf) leaves a file in the registry directory
 // (~/.cache/rex8s/pf/<pid>.json) while it runs, so `kpf -l` and the Raycast
 // menu bar can list and stop them; its output goes to <local port>.log
 // next to it.
@@ -54,7 +54,7 @@ func (e Entry) URL() string {
 // Registry is the directory of the running forwards.
 type Registry struct {
 	Dir string // ~/.cache/rex8s/pf
-	// Bin is the rex8s binary: Ensure runs `Bin pfbg …` to hold a forward.
+	// Bin is the rex8s binary: Ensure runs `Bin _pf …` to hold a forward.
 	Bin string
 }
 
@@ -244,7 +244,7 @@ func (r Registry) lock() (unlock func(), err error) {
 // EnsureWait is how long Ensure waits for a new forward to register.
 var EnsureWait = 10 * time.Second
 
-// ListenerFD is the descriptor a pfbg started by Ensure listens on; the
+// ListenerFD is the descriptor a rex8s _pf started by Ensure listens on; the
 // environment variable ListenerEnv says so.
 const (
 	ListenerFD  = 3
@@ -255,7 +255,7 @@ const (
 // when none runs: on wantLocal when it is free (0: the service's port),
 // otherwise on a random port. reused says it was already running.
 //
-// The local port is taken here and handed to `Bin pfbg` already listening,
+// The local port is taken here and handed to `Bin _pf` already listening,
 // so no other process can take it in between.
 func (r Registry) Ensure(c kube.Context, ns, svc string, port kube.ServicePort, wantLocal int) (e Entry, reused bool, err error) {
 	unlock, err := r.lock()
@@ -288,13 +288,13 @@ func (r Registry) Ensure(c kube.Context, ns, svc string, port kube.ServicePort, 
 		return Entry{}, false, err
 	}
 	defer logf.Close()
-	cmd := exec.Command(r.Bin, "pfbg", c.Name, ns, svc, fmt.Sprintf("%d:%d", local, port.Port), string(DetectKind(port)))
+	cmd := exec.Command(r.Bin, "_pf", c.Name, ns, svc, fmt.Sprintf("%d:%d", local, port.Port), string(DetectKind(port)))
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.ExtraFiles = []*os.File{lf} // fd 3
 	cmd.Env = append(os.Environ(), ListenerEnv+"="+strconv.Itoa(ListenerFD))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	err = cmd.Start()
-	lf.Close() // the socket is pfbg's now
+	lf.Close() // the socket is _pf's now
 	if err != nil {
 		return Entry{}, false, err
 	}

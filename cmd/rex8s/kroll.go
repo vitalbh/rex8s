@@ -25,23 +25,9 @@ const rollTimeout = 10 * time.Minute
 //
 // --target CTX|KIND|NS|NAME (repeatable) skips the picker (Raycast).
 func (a *app) kroll(args []string) error {
-	filter := ""
-	var given []target
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--target" && i+1 < len(args) {
-			p := strings.SplitN(args[i+1], "|", 4)
-			i++
-			if len(p) != 4 {
-				return fmt.Errorf("--target wants CTX|KIND|NS|NAME, got %q", args[i])
-			}
-			c, err := a.context(p[0])
-			if err != nil {
-				return err
-			}
-			given = append(given, target{c: c, Workload: kube.Workload{Kind: p[1], Namespace: p[2], Name: p[3]}})
-			continue
-		}
-		filter = args[i]
+	filter, given, err := a.parseKrollArgs(args)
+	if err != nil {
+		return err
 	}
 	cl, err := a.client(a.src)
 	if err != nil {
@@ -50,17 +36,7 @@ func (a *app) kroll(args []string) error {
 	cl.Timeout = 30 * time.Second
 	targets := given
 	if len(targets) == 0 {
-		raw, err := kube.Load(a.src)
-		if err != nil {
-			return err
-		}
-		clusters := fleet.All(raw, a.cfg)
-		var skipped []string
-		targets, _, err = a.pickTargets(cl, clusters, filter, "Restart which workloads?", &skipped)
-		for _, s := range skipped {
-			fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
-		}
-		if err != nil || len(targets) == 0 {
+		if targets, err = a.pickRollTargets(cl, filter); err != nil || len(targets) == 0 {
 			return err
 		}
 	}
@@ -81,7 +57,47 @@ func (a *app) kroll(args []string) error {
 		return err
 	}
 	fmt.Println()
+	return followRollouts(cl, restartAll(cl, targets))
+}
 
+// parseKrollArgs: kroll [FILTER] [--target CTX|KIND|NS|NAME]...
+func (a *app) parseKrollArgs(args []string) (filter string, given []target, err error) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--target" && i+1 < len(args) {
+			p := strings.SplitN(args[i+1], "|", 4)
+			i++
+			if len(p) != 4 {
+				return "", nil, fmt.Errorf("--target wants CTX|KIND|NS|NAME, got %q", args[i])
+			}
+			c, err := a.context(p[0])
+			if err != nil {
+				return "", nil, err
+			}
+			given = append(given, target{c: c, Workload: kube.Workload{Kind: p[1], Namespace: p[2], Name: p[3]}})
+			continue
+		}
+		filter = args[i]
+	}
+	return filter, given, nil
+}
+
+// pickRollTargets: the workloads of every cluster, the ones to restart marked.
+func (a *app) pickRollTargets(cl kube.Client, filter string) ([]target, error) {
+	raw, err := kube.Load(a.src)
+	if err != nil {
+		return nil, err
+	}
+	var skipped []string
+	targets, _, err := a.pickTargets(cl, fleet.All(raw, a.cfg), filter, "Restart which workloads?", &skipped)
+	for _, s := range skipped {
+		fmt.Fprintln(os.Stderr, tui.Warn.Render("  "+s))
+	}
+	return targets, err
+}
+
+// restartAll runs rollout restart on every target; the ones kubectl
+// refused are finished already, with its error.
+func restartAll(cl kube.Client, targets []target) []rollState {
 	states := make([]rollState, len(targets))
 	for i, t := range targets {
 		states[i] = rollState{t: t, start: time.Now()}
@@ -93,7 +109,12 @@ func (a *app) kroll(args []string) error {
 			states[i].end = time.Now()
 		}
 	}
+	return states
+}
 
+// followRollouts polls every rollout until all finished, redrawing one line
+// each on a terminal and the progress in the tab header.
+func followRollouts(cl kube.Client, states []rollState) error {
 	tty := term.IsTerminal(int(os.Stdout.Fd()))
 	drawn := 0
 	draw := func() {

@@ -9,7 +9,7 @@
 init.lua ── require("rex8s") ── rex/rex8s.lua     actions + key bindings + layouts (Lua, in the Rex server)
                                    │
                                    ▼  each pane runs
-                              rex8s pick|pane|k9s|…        (Go + Bubble Tea)
+                              rex8s pick|pane|browser|…    (Go + Bubble Tea)
                                    │
                     pane: KUBECONFIG=<pane>.yaml:~/.kube/config
                           PATH=<bin>:$PATH  →  kubectl/helm/flux = rex8s-guard
@@ -29,19 +29,53 @@ terminals that don't answer — unacceptable in a wrapper that runs on every
 
 Port-forwards (`kpf`, the links in the logs) are a local listener that starts
 `kubectl port-forward` on a port of its own at the first connection and copies
-the bytes; `kpf`'s run as a background `rex8s pfbg` process registered in
+the bytes; `kpf`'s run as a background `rex8s _pf` process registered in
 `~/.cache/rex8s/pf/`, the logs' live inside the log pane.
 
 ## Build and test
 
 ```sh
-make test                          # go vet + go test
-make install                       # build and rex8s setup
-cd raycast && npx tsc --noEmit -p .
+make check      # fmt + vet (also for macOS and Linux) + test: before a commit
+make install    # build both binaries into ~/.config/rex/rex8s/bin and run rex8s setup (no tests)
+make build      # bin/rex8s and bin/rex8s-guard, with the version from git describe
+make fmt        # gofmt -w cmd internal rex
+make test       # go test ./...  (go test -short ./... skips the end-to-end test)
+make race       # go test -race ./...
+make lint       # the gofmt check + golangci-lint (.golangci.yml)
+make raycast    # type-check the Raycast extension (tsc --noEmit)
 ```
 
-A release is a tag: pushing `vX.Y.Z` builds the binaries, publishes them and
-updates the Homebrew tap.
+`make lint` needs [golangci-lint](https://golangci-lint.run) v2 built with
+the Go in `go.mod` (`go install
+github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4`; CI pins the
+same version). `.golangci.yml` keeps the standard linters without `errcheck`
+and without the style-only staticcheck checks.
+
+**Tests.** Each `foo.go` has its tests in `foo_test.go`. Code that runs
+kubectl is tested with `internal/testkube`, a fake kubectl that answers by
+context and arguments with a given stdout, stderr, exit code, delay, or a
+child process holding the pipe:
+
+```go
+k := testkube.New(t).
+	On("use", "get pods *", testkube.Reply{Stdout: podsJSON}).
+	On("euw", "*", testkube.Reply{Stderr: "error: You must be logged in to the server (Unauthorized)\n", Exit: 1})
+cl := kube.Client{Kubectl: k.Path, Kubeconfig: k.Kubeconfig}
+// … k.Calls() lists what ran
+```
+
+`cmd/rex8s/e2e_test.go` builds rex8s and runs `version`, `list
+clusters|pods|failing|workloads`, `kver` and `kstatus` in [demo
+mode](#demo-mode) (`REX8S_DEMO`, a throwaway HOME): it needs `python3` for the
+demo kubectl and is skipped by `go test -short`.
+
+CI (`.github/workflows/ci.yml`) runs the gofmt check, `go vet` for Linux and
+macOS, `go test -race`, golangci-lint and the Raycast type check.
+
+A release is a tag: pushing `vX.Y.Z` vets (Linux and macOS) and tests, builds
+the binaries, runs the linux/amd64 one (`rex8s version`, `rex8s-guard
+--version`) as a smoke test, publishes them and updates the Homebrew tap. Two
+runs for the same tag wait for each other.
 
 ## Demo mode
 

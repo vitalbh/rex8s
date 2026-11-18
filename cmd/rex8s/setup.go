@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,18 +21,7 @@ import (
 	rexlua "github.com/vitalbh/rex8s/rex"
 )
 
-// wrapperCmds: the commands panes have on PATH → the rex8s subcommand each
-// one runs. The single list: setup writes them, doctor checks them.
-var wrapperCmds = map[string]string{
-	"kctx": "switch", "kns": "ns", "kflux": "flux", "klogs": "logs",
-	"fwatch": "fwatch", "fdiff": "fdiff", "kpf": "kpf", "kauth": "kauth", "kexec": "kexec",
-	"kwarn": "kwarn", "kwhy": "kwhy", "kfail": "kfail", "kjobs": "kjobs", "kpods": "kpods", "kview": "kview", "kstatus": "kstatus",
-	"krun": "krun", "kver": "kver", "kroll": "kroll", "kdiff": "kdiff", "knode": "knode",
-	"kask": "kask", "ktint": "ktint", "khelp": "khelp", "knet": "knet", "kwhat": "kwhat",
-	"kgrep": "kgrep", "kcron": "kcron", "kreq": "kreq", "kincident": "kincident",
-	"kdisk": "kdisk", "kgit": "kgit", "kjunk": "kjunk", "kmulti": "kmulti", "kall": "kall",
-}
-
+// The k* wrappers run the commands of the table in commands.go (wrapperOf);
 // guardedTools go through rex8s-guard (production confirmation).
 var guardedTools = []string{"kubectl", "helm", "flux"}
 
@@ -186,7 +174,7 @@ func copyFile(src, dst string, mode os.FileMode) error {
 }
 
 func wrapperScript(name string) string {
-	if sub, ok := wrapperCmds[name]; ok {
+	if sub, ok := wrapperOf[name]; ok {
 		return fmt.Sprintf("#!/bin/sh\n%s\nexec \"$(dirname \"$0\")/rex8s\" %s \"$@\"\n", wrapperMark, sub)
 	}
 	return fmt.Sprintf("#!/bin/sh\n%s\nexec \"$(dirname \"$0\")/rex8s-guard\" %s \"$@\"\n", wrapperMark, name)
@@ -194,7 +182,7 @@ func wrapperScript(name string) string {
 
 func wrapperNames() []string {
 	names := append([]string{}, guardedTools...)
-	for n := range wrapperCmds {
+	for n := range wrapperOf {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -301,28 +289,63 @@ func onPath(dir string) bool {
 
 // doctor checks the installation and the tools rex8s uses.
 func (a *app) doctor(args []string) error {
-	bad := 0
-	check := func(ok bool, warnOnly bool, what, detail string) {
-		mark := tui.Ok.Render("✓")
-		switch {
-		case !ok && warnOnly:
-			mark = tui.Warn.Render("!")
-		case !ok:
-			mark = tui.Err.Render("✗")
-			bad++
-		}
-		if detail != "" {
-			detail = tui.Dim.Render("  " + detail)
-		}
-		fmt.Println(mark + " " + what + detail)
+	d := &checker{}
+	d.section("rex8s")
+	a.doctorInstall(d)
+	d.section("Rex")
+	doctorRex(d)
+	d.section("tools")
+	a.doctorTools(d)
+	d.section("config")
+	a.doctorConfig(d)
+	d.section("agents")
+	for _, s := range agentSkillDirs() {
+		d.check(s.state == "current", true, "skill in "+tildePath(s.dir), map[string]string{"current": "", "outdated": "rex8s agents install", "missing": "rex8s agents install (optional)"}[s.state])
 	}
-	section := func(s string) { fmt.Println("\n" + tui.Bold.Render(s)) }
 
-	section("rex8s")
-	check(true, false, "rex8s "+version, a.binDir)
+	fmt.Println()
+	if d.bad > 0 {
+		return fmt.Errorf("%d problem(s) above", d.bad)
+	}
+	fmt.Println(tui.Ok.Render("all good"))
+	return nil
+}
+
+// checker prints doctor's lines and counts the problems.
+type checker struct{ bad int }
+
+// check prints ✓, ! (a warning: warnOnly) or ✗ (a problem) before what.
+func (d *checker) check(ok bool, warnOnly bool, what, detail string) {
+	mark := tui.Ok.Render("✓")
+	switch {
+	case !ok && warnOnly:
+		mark = tui.Warn.Render("!")
+	case !ok:
+		mark = tui.Err.Render("✗")
+		d.bad++
+	}
+	if detail != "" {
+		detail = tui.Dim.Render("  " + detail)
+	}
+	fmt.Println(mark + " " + what + detail)
+}
+
+func (d *checker) section(s string) { fmt.Println("\n" + tui.Bold.Render(s)) }
+
+// unless is detail when !ok, "" when ok.
+func unless(ok bool, detail string) string {
+	if ok {
+		return ""
+	}
+	return detail
+}
+
+// doctorInstall: the binaries and the wrappers setup installs.
+func (a *app) doctorInstall(d *checker) {
+	d.check(true, false, "rex8s "+version, a.binDir)
 	dir := installBinDir()
 	_, err := os.Stat(filepath.Join(dir, "rex8s"))
-	check(err == nil, false, "installed in "+tildePath(dir), map[bool]string{true: "", false: "run rex8s setup"}[err == nil])
+	d.check(err == nil, false, "installed in "+tildePath(dir), unless(err == nil, "run rex8s setup"))
 	missing, stale := 0, 0
 	for _, n := range wrapperNames() {
 		data, err := os.ReadFile(filepath.Join(dir, n))
@@ -333,35 +356,39 @@ func (a *app) doctor(args []string) error {
 			stale++
 		}
 	}
-	check(missing+stale == 0, false, fmt.Sprintf("%d commands (k*, kubectl/helm/flux guard)", len(wrapperNames())),
-		map[bool]string{true: "", false: fmt.Sprintf("%d missing, %d outdated: rex8s setup", missing, stale)}[missing+stale == 0])
-	check(onPath(dir), true, "on this shell's PATH", map[bool]string{true: "", false: "only rex8s panes have them; see docs/configuration.md › In any shell"}[onPath(dir)])
+	d.check(missing+stale == 0, false, fmt.Sprintf("%d commands (k*, kubectl/helm/flux guard)", len(wrapperNames())),
+		unless(missing+stale == 0, fmt.Sprintf("%d missing, %d outdated: rex8s setup", missing, stale)))
+	d.check(onPath(dir), true, "on this shell's PATH", unless(onPath(dir), "only rex8s panes have them; see docs/configuration.md › In any shell"))
+}
 
-	section("Rex")
+// doctorRex: the rex CLI, the server, rex8s.lua and init.lua.
+func doctorRex(d *checker) {
 	rb := findRex()
-	check(rb != "", false, "rex CLI", rb)
+	d.check(rb != "", false, "rex CLI", rb)
 	if rb != "" {
 		out, err := exec.Command(rb, "ls", "--json").CombinedOutput()
-		check(err == nil, false, "Rex server answers", map[bool]string{true: "", false: strings.TrimSpace(string(out))}[err == nil])
+		d.check(err == nil, false, "Rex server answers", unless(err == nil, strings.TrimSpace(string(out))))
 	}
 	lua, err := os.ReadFile(filepath.Join(rexConfigDir(), "rex8s.lua"))
 	switch {
 	case err != nil:
-		check(false, false, "rex8s.lua", "missing: rex8s setup")
+		d.check(false, false, "rex8s.lua", "missing: rex8s setup")
 	case string(lua) != rexlua.Source:
-		check(false, false, "rex8s.lua", "outdated (another rex8s version wrote it): rex8s setup")
+		d.check(false, false, "rex8s.lua", "outdated (another rex8s version wrote it): rex8s setup")
 	default:
-		check(true, false, "rex8s.lua up to date", "")
+		d.check(true, false, "rex8s.lua up to date", "")
 	}
 	init, _ := os.ReadFile(rexInitFile())
-	check(strings.Contains(string(init), "rex8s"), false, requireLine+" in "+tildePath(rexInitFile()), "")
+	d.check(strings.Contains(string(init), "rex8s"), false, requireLine+" in "+tildePath(rexInitFile()), "")
 	fmt.Println(tui.Dim.Render("· Raycast can show the tab it opens only with Remote Control on (Rex › Settings › Rex Server); not checkable from here"))
+}
 
-	section("tools")
+// doctorTools: kubectl and the optional tools, with their versions.
+func (a *app) doctorTools(d *checker) {
 	tool := func(name string, required bool, why string, versionArgs ...string) {
 		p := pathx.Real(name, a.binDir)
 		if p == "" {
-			check(false, !required, name, "not found: "+why)
+			d.check(false, !required, name, "not found: "+why)
 			return
 		}
 		v := ""
@@ -370,7 +397,7 @@ func (a *app) doctor(args []string) error {
 				v = strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
 			}
 		}
-		check(true, false, name, strings.TrimSpace(v+"  "+p))
+		d.check(true, false, name, strings.TrimSpace(v+"  "+p))
 	}
 	tool("kubectl", true, "everything needs it", "version", "--client")
 	tool("flux", false, "fdiff needs it (brew install fluxcd/tap/flux)", "--version")
@@ -379,12 +406,15 @@ func (a *app) doctor(args []string) error {
 	tool("codex", false, "optional: kask can use it (rex8s config set ask_agent codex)", "--version")
 	tool("gh", false, "optional", "--version")
 	tool("git", false, "fwatch, fdiff and kgit need it", "--version")
+}
 
-	section("config")
-	check(true, false, tildePath(a.cfg.File()), map[bool]string{true: "", false: "not created yet: everything is optional"}[fileExists(a.cfg.File())])
+// doctorConfig: the config file, the kubeconfig, the GitOps clones and
+// the favorite forwards' clusters.
+func (a *app) doctorConfig(d *checker) {
+	d.check(true, false, tildePath(a.cfg.File()), unless(fileExists(a.cfg.File()), "not created yet: everything is optional"))
 	raw, err := kube.Load(a.src)
 	if err != nil {
-		check(false, false, "kubeconfig "+tildePath(a.src), err.Error())
+		d.check(false, false, "kubeconfig "+tildePath(a.src), err.Error())
 	} else {
 		cs := kube.Contexts(raw, a.cfg)
 		prod := 0
@@ -393,37 +423,24 @@ func (a *app) doctor(args []string) error {
 				prod++
 			}
 		}
-		check(len(cs) > 0, false, fmt.Sprintf("kubeconfig %s: %d contexts, %d production", tildePath(a.src), len(cs), prod),
-			map[bool]string{true: "", false: "no contexts"}[len(cs) > 0])
-		check(prod > 0 || len(a.cfg.Clusters) > 0, true, "production rules", map[bool]string{true: "", false: "no cluster is marked prod: add clusters: in the config"}[prod > 0 || len(a.cfg.Clusters) > 0])
+		d.check(len(cs) > 0, false, fmt.Sprintf("kubeconfig %s: %d contexts, %d production", tildePath(a.src), len(cs), prod),
+			unless(len(cs) > 0, "no contexts"))
+		marked := prod > 0 || len(a.cfg.Clusters) > 0
+		d.check(marked, true, "production rules", unless(marked, "no cluster is marked prod: add clusters: in the config"))
 	}
-	for _, d := range a.cfg.GitopsDirs() {
-		check(fileExists(filepath.Join(d, ".git")), true, "gitops_repos "+tildePath(d), "")
+	for _, dir := range a.cfg.GitopsDirs() {
+		d.check(fileExists(filepath.Join(dir, ".git")), true, "gitops_repos "+tildePath(dir), "")
 	}
 	for _, f := range a.cfg.Forwards {
 		_, err := a.context(f.Cluster)
-		check(err == nil, true, "favorite forward "+f.Name, map[bool]string{true: "", false: "cluster " + f.Cluster + " not found"}[err == nil])
+		d.check(err == nil, true, "favorite forward "+f.Name, unless(err == nil, "cluster "+f.Cluster+" not found"))
 	}
-
-	section("agents")
-	for _, s := range agentSkillDirs() {
-		check(s.state == "current", true, "skill in "+tildePath(s.dir), map[string]string{"current": "", "outdated": "rex8s agents install", "missing": "rex8s agents install (optional)"}[s.state])
-	}
-
-	fmt.Println()
-	if bad > 0 {
-		return fmt.Errorf("%d problem(s) above", bad)
-	}
-	fmt.Println(tui.Ok.Render("all good"))
-	return nil
 }
 
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
-
-var errNoConfig = errors.New("no config file")
 
 // configPath: the config file, even when it doesn't exist yet.
 func (a *app) configPath() string {

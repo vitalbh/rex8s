@@ -13,6 +13,7 @@ import (
 
 	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/kube"
+	"github.com/vitalbh/rex8s/internal/testkube"
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
@@ -23,24 +24,26 @@ var (
 	kvDev  = kube.Context{Name: "ctx-use", Short: "use"}
 )
 
-// fakeKview is a kview -A whose kubectl is a script answering from files:
-// DIR/<context>-<resource>.json ({"items":[]} when missing).
-func fakeKview(t *testing.T, files map[string]string) *kview {
+// fakeKview is a kview -A on kvProd and kvDev whose kubectl answers `get
+// RESOURCE` with replies["<context>-<resource>.json"] ({"items":[]} when
+// missing). Its kubectl is also where the guard would be (binDir).
+func fakeKview(t *testing.T, replies map[string]string) *kview {
 	t.Helper()
-	dir := t.TempDir()
-	for name, body := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
+	k := testkube.New(t).Default(testkube.Reply{Stdout: `{"items":[]}`})
+	for name, body := range replies {
+		used := false
+		for _, c := range []kube.Context{kvProd, kvDev} {
+			if res, ok := strings.CutPrefix(strings.TrimSuffix(name, ".json"), c.Name+"-"); ok {
+				k.On(c.Name, "get "+res+" *", testkube.Reply{Stdout: body})
+				used = true
+			}
+		}
+		if !used {
+			t.Fatalf("fakeKview: %q names no cluster", name)
 		}
 	}
-	script := "#!/bin/sh\n# --context CTX get RESOURCE …\nf='" + dir + "'/\"$2-$4.json\"\n" +
-		"if [ -f \"$f\" ]; then cat \"$f\"; else echo '{\"items\":[]}'; fi\n"
-	bin := filepath.Join(dir, "kubectl")
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r := &fleet.Reader{Client: kube.Client{Kubectl: bin, Kubeconfig: filepath.Join(dir, "kubeconfig"), Timeout: 5 * time.Second}}
-	return &kview{a: &app{binDir: dir, src: filepath.Join(dir, "kubeconfig")}, cl: r.Client, fleet: r,
+	r := &fleet.Reader{Client: kube.Client{Kubectl: k.Path, Kubeconfig: k.Kubeconfig, Timeout: 5 * time.Second}}
+	return &kview{a: &app{binDir: k.Dir, src: k.Kubeconfig}, cl: r.Client, fleet: r,
 		clusters: []kube.Context{kvProd, kvDev}, multi: true, objs: map[string]any{}, headers: map[string]string{}}
 }
 
@@ -256,9 +259,9 @@ func TestKviewActionArgv(t *testing.T) {
 		t.Errorf("a Job without a CronJob reran: %+v", r)
 	}
 
-	// outside Rex, logs run here: rex8s logtail CTX NS POD *
+	// outside Rex, logs run here: rex8s _logs CTX NS POD *
 	r := k.podAction(pod, "l")
-	if r.Exec == nil || !slices.Equal(r.Exec.Args[1:], []string{"logtail", kvProd.Name, "default", "web-7d9f", "*"}) {
+	if r.Exec == nil || !slices.Equal(r.Exec.Args[1:], []string{"_logs", kvProd.Name, "default", "web-7d9f", "*"}) {
 		t.Errorf("logs: %+v", r)
 	}
 
@@ -271,13 +274,8 @@ func TestKviewActionArgv(t *testing.T) {
 
 // describe/YAML text is cleaned of escape sequences.
 func TestKviewTextIsCleaned(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "kubectl")
-	script := "#!/bin/sh\nprintf 'Name: web\\033]52;c;cGF3bmVk\\007\\033[2J\\nok\\n'\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	k := &kview{cl: kube.Client{Kubectl: bin, Kubeconfig: filepath.Join(dir, "kc")}}
+	fake := testkube.New(t).Default(testkube.Reply{Stdout: "Name: web\x1b]52;c;cGF3bmVk\a\x1b[2J\nok\n"})
+	k := &kview{cl: kube.Client{Kubectl: fake.Path, Kubeconfig: fake.Kubeconfig}}
 	r := k.text(kvDev, "describe pod web", "describe", "pod", "web")
 	if r.Err != nil || r.Text != "Name: web\nok\n" {
 		t.Fatalf("text %q err %v", r.Text, r.Err)

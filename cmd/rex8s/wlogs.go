@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -67,19 +65,12 @@ func (a *app) kgrep(args []string) error {
 
 // askPattern prompts for a regex on the terminal ("" cancels).
 func askPattern() string {
-	fmt.Fprint(os.Stderr, tui.Bold.Render("Search the logs for")+tui.Dim.Render(" (regex, case-insensitive; empty cancels)")+"\n  > ")
-	tty, err := os.Open("/dev/tty")
-	if err != nil {
-		return ""
-	}
-	defer tty.Close()
-	line, _ := bufio.NewReader(tty).ReadString('\n')
-	return strings.TrimSpace(line)
+	line, _ := tui.AskLine(tui.Bold.Render("Search the logs for") + tui.Dim.Render(" (regex, case-insensitive; empty cancels)") + "\n  > ")
+	return line
 }
 
-func (a *app) klogsWith(args []string, ask bool) error {
-	filter, all := "", false
-	var lo logOpts
+// parseKlogsArgs: klogs [-A] [-g RE] [-s DUR] [FILTER].
+func parseKlogsArgs(args []string) (filter string, all bool, lo logOpts, err error) {
 	for i := 0; i < len(args); i++ {
 		switch arg := args[i]; {
 		case arg == "-A":
@@ -94,7 +85,13 @@ func (a *app) klogsWith(args []string, ask bool) error {
 			filter = arg
 		}
 	}
-	if _, err := lo.Compile(); err != nil {
+	_, err = lo.Compile()
+	return filter, all, lo, err
+}
+
+func (a *app) klogsWith(args []string, ask bool) error {
+	filter, all, lo, err := parseKlogsArgs(args)
+	if err != nil {
 		return err
 	}
 	if all {
@@ -104,93 +101,15 @@ func (a *app) klogsWith(args []string, ask bool) error {
 	if err != nil {
 		return err
 	}
-	ns := nsOr(c.Namespace)
-	scope, where := []string{"-n", ns}, c.Short+"/"+ns
-	if c.AllNS {
-		scope, where = []string{"-A"}, c.Short+" (all namespaces)"
-	}
 	cl, err := a.client(a.src)
 	if err != nil {
 		return err
 	}
-	pods := map[string]kube.Pod{}
-	works := map[string]target{}
+	lc := newLogChoices(cl, c)
 	it, err := tui.Run(tui.Options{
-		Title: fmt.Sprintf("Logs · %s · a workload follows all its pods", where),
+		Title: fmt.Sprintf("Logs · %s · a workload follows all its pods", lc.where),
 		Query: filter,
-		Load: func() ([]tui.Item, error) {
-			var wout, pout []byte
-			var werr, perr error
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() {
-				defer wg.Done()
-				wout, werr = cl.Get(c.Name, append([]string{"get", "deployments,statefulsets,daemonsets", "-o", "json"}, scope...)...)
-			}()
-			go func() {
-				defer wg.Done()
-				pout, perr = cl.Get(c.Name, append([]string{"get", "pods", "-o", "json"}, scope...)...)
-			}()
-			wg.Wait()
-			if perr != nil {
-				return nil, perr
-			}
-			ps, err := kube.ParsePods(pout)
-			if err != nil {
-				return nil, err
-			}
-			var ws []target
-			if werr == nil {
-				ws, _ = workloadTargets(wout)
-			}
-			// every namespace: names carry theirs
-			wname := func(t target) string {
-				if c.AllNS {
-					return t.Namespace + "/" + t.Name
-				}
-				return t.Name
-			}
-			pname := func(p kube.Pod) string {
-				if c.AllNS {
-					return p.Namespace + "/" + p.Name
-				}
-				return p.Name
-			}
-			w := 0
-			for _, t := range ws {
-				w = max(w, len(kube.ShortKind(t.Kind))+1+len(wname(t)))
-			}
-			for _, p := range ps {
-				w = max(w, len(pname(p)))
-			}
-			var items []tui.Item
-			for _, t := range ws {
-				if t.Selector == "" {
-					continue
-				}
-				n := 0
-				for _, p := range ps {
-					if p.Namespace == t.Namespace && matchesSelector(p, t) {
-						n++
-					}
-				}
-				key := "w:" + t.Kind + "/" + t.Namespace + "/" + t.Name
-				works[key] = t
-				items = append(items, tui.Item{Key: key, Label: fmt.Sprintf("%-*s", w, kube.ShortKind(t.Kind)+" "+wname(t)),
-					Hint: fmt.Sprintf("all %d pod(s), merged", n), Badge: "ALL"})
-			}
-			rank := map[string]int{"FAIL": 0, "WAIT": 1, "ok": 2, "done": 3}
-			sort.SliceStable(ps, func(i, j int) bool { return rank[ps[i].Badge()] < rank[ps[j].Badge()] })
-			for _, p := range ps {
-				pods[pname(p)] = p
-				items = append(items, tui.Item{Key: pname(p), Label: fmt.Sprintf("%-*s", w, pname(p)), Badge: p.Badge(),
-					Hint: fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.Status(), p.Ready, p.Total, p.Restarts, kube.Age(p.Created))})
-			}
-			if len(items) == 0 {
-				return nil, fmt.Errorf("no pods in %s", where)
-			}
-			return items, nil
-		},
+		Load:  lc.load,
 	})
 	if err != nil || it == nil {
 		return err
@@ -203,15 +122,118 @@ func (a *app) klogsWith(args []string, ask bool) error {
 			return err
 		}
 	}
+	return a.followChoice(c, lc, it.Key, lo)
+}
+
+// logChoices is what the klogs picker offers in one cluster: the
+// workloads of the namespace (all their pods merged) first, then its pods.
+type logChoices struct {
+	cl    kube.Client
+	c     kube.Context
+	scope []string // -n NS, or -A
+	where string   // cluster/ns, for titles and errors
+	pods  map[string]kube.Pod
+	works map[string]target
+}
+
+func newLogChoices(cl kube.Client, c kube.Context) *logChoices {
+	ns := nsOr(c.Namespace)
+	lc := &logChoices{cl: cl, c: c, scope: []string{"-n", ns}, where: c.Short + "/" + ns,
+		pods: map[string]kube.Pod{}, works: map[string]target{}}
+	if c.AllNS {
+		lc.scope, lc.where = []string{"-A"}, c.Short+" (all namespaces)"
+	}
+	return lc
+}
+
+// name of a workload or pod: with every namespace, names carry theirs.
+func (lc *logChoices) name(ns, name string) string {
+	if lc.c.AllNS {
+		return ns + "/" + name
+	}
+	return name
+}
+
+func (lc *logChoices) load() ([]tui.Item, error) {
+	var wout, pout []byte
+	var werr, perr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		wout, werr = lc.cl.Get(lc.c.Name, append([]string{"get", "deployments,statefulsets,daemonsets", "-o", "json"}, lc.scope...)...)
+	}()
+	go func() {
+		defer wg.Done()
+		pout, perr = lc.cl.Get(lc.c.Name, append([]string{"get", "pods", "-o", "json"}, lc.scope...)...)
+	}()
+	wg.Wait()
+	if perr != nil {
+		return nil, perr
+	}
+	ps, err := kube.ParsePods(pout)
+	if err != nil {
+		return nil, err
+	}
+	var ws []target
+	if werr == nil {
+		ws, _ = workloadTargets(wout)
+	}
+	items := lc.items(ws, ps)
+	if len(items) == 0 {
+		return nil, fmt.Errorf("no pods in %s", lc.where)
+	}
+	return items, nil
+}
+
+// items: the workloads, then the pods, broken first.
+func (lc *logChoices) items(ws []target, ps []kube.Pod) []tui.Item {
+	w := 0
+	for _, t := range ws {
+		w = max(w, len(kube.ShortKind(t.Kind))+1+len(lc.name(t.Namespace, t.Name)))
+	}
+	for _, p := range ps {
+		w = max(w, len(lc.name(p.Namespace, p.Name)))
+	}
+	var items []tui.Item
+	for _, t := range ws {
+		if t.Selector == "" {
+			continue
+		}
+		n := 0
+		for _, p := range ps {
+			if p.Namespace == t.Namespace && matchesSelector(p, t) {
+				n++
+			}
+		}
+		key := "w:" + t.Kind + "/" + t.Namespace + "/" + t.Name
+		lc.works[key] = t
+		items = append(items, tui.Item{Key: key, Label: fmt.Sprintf("%-*s", w, kube.ShortKind(t.Kind)+" "+lc.name(t.Namespace, t.Name)),
+			Hint: fmt.Sprintf("all %d pod(s), merged", n), Badge: "ALL"})
+	}
+	rank := map[string]int{"FAIL": 0, "WAIT": 1, "ok": 2, "done": 3}
+	sort.SliceStable(ps, func(i, j int) bool { return rank[ps[i].Badge()] < rank[ps[j].Badge()] })
+	for _, p := range ps {
+		name := lc.name(p.Namespace, p.Name)
+		lc.pods[name] = p
+		items = append(items, tui.Item{Key: name, Label: fmt.Sprintf("%-*s", w, name), Badge: p.Badge(),
+			Hint: fmt.Sprintf("%-18s %d/%d  restarts %-3d %s", p.Status(), p.Ready, p.Total, p.Restarts, kube.Age(p.Created))})
+	}
+	return items
+}
+
+// followChoice follows the picked workload or pod: in a split behind this
+// pane in Rex, here outside it.
+func (a *app) followChoice(c kube.Context, lc *logChoices, key string, lo logOpts) error {
 	self := filepath.Join(a.binDir, "rex8s")
-	if t, ok := works[it.Key]; ok {
+	if t, ok := lc.works[key]; ok {
 		spec := logSpec{c.Name, t.Namespace, t.Selector, kube.ShortKind(t.Kind) + " " + t.Name}
 		if rex.Block() == "" {
 			return a.wlogtail([]string{spec.String()}, lo)
 		}
-		return rex.SplitBehind("logs "+t.Name, append([]string{self, "wlogtail"}, append(lo.Flags(), spec.String())...)...)
+		return rex.SplitBehind("logs "+t.Name, append([]string{self, "_wlogs"}, append(lo.Flags(), spec.String())...)...)
 	}
-	p := pods[it.Key]
+	p := lc.pods[key]
 	container, ok, err := pickContainer(p, true)
 	if err != nil || !ok {
 		return err
@@ -219,7 +241,7 @@ func (a *app) klogsWith(args []string, ask bool) error {
 	if rex.Block() == "" {
 		return a.logtail(c.Name, p.Namespace, p.Name, container, lo)
 	}
-	argv := append([]string{self, "logtail"}, lo.Flags()...)
+	argv := append([]string{self, "_logs"}, lo.Flags()...)
 	argv = append(argv, c.Name, p.Namespace, p.Name)
 	if container != "" {
 		argv = append(argv, container)
@@ -342,7 +364,7 @@ func (a *app) klogsClusters(filter string, lo logOpts, ask bool) error {
 	if len(names) > 1 {
 		label = fmt.Sprintf("logs %s +%d", names[0], len(names)-1)
 	}
-	argv := append([]string{filepath.Join(a.binDir, "rex8s"), "wlogtail"}, lo.Flags()...)
+	argv := append([]string{filepath.Join(a.binDir, "rex8s"), "_wlogs"}, lo.Flags()...)
 	return rex.SplitBehind(label, append(argv, specs...)...)
 }
 
@@ -361,7 +383,7 @@ func (a *app) wlogtail(raw []string, lo logOpts) error {
 		}
 	}
 	if len(specs) == 0 {
-		return fmt.Errorf("wlogtail: nothing to follow")
+		return fmt.Errorf("_wlogs: nothing to follow")
 	}
 	cl, err := a.client(a.src)
 	if err != nil {
@@ -398,8 +420,7 @@ func (a *app) wlogtail(raw []string, lo logOpts) error {
 		}()
 	}
 	wg.Wait()
-	fmt.Fprint(os.Stderr, tui.Dim.Render("\nlogs ended · press enter to close"))
-	bufio.NewReader(os.Stdin).ReadString('\n')
+	waitClose("logs ended")
 	return nil
 }
 

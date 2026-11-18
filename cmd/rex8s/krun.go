@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -54,25 +53,7 @@ func (a *app) krun(args []string) error {
 			return nil
 		}
 	}
-
-	// the pods of each marked workload
-	type podRef struct {
-		t   target
-		pod string
-	}
-	var pods []podRef
-	perTarget := map[string]int{}
-	for _, t := range targets {
-		names, err := cl.RunningPods(t.c.Name, t.Namespace, t.Selector)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, tui.Err.Render(fmt.Sprintf("  %s %s/%s: %v", t.c.Short, t.Namespace, t.Name, err)))
-			continue
-		}
-		perTarget[t.key()] = len(names)
-		for _, p := range names {
-			pods = append(pods, podRef{t, p})
-		}
-	}
+	pods, perTarget := runningPodsOf(cl, targets)
 	if len(pods) == 0 {
 		return errors.New("no running pods to run in")
 	}
@@ -92,14 +73,46 @@ func (a *app) krun(args []string) error {
 	if ok, err := confirmChange(touched, fmt.Sprintf("krun: run %q in %d pod(s)", cmdText, len(pods))); !ok {
 		return err
 	}
+	return printRunResults(pods, execInPods(cl, pods, container, command))
+}
 
-	// run, at most 8 at a time; print in plan order
-	type result struct {
-		out string
-		err error
-		dur time.Duration
+// podRef is one pod of a marked workload.
+type podRef struct {
+	t   target
+	pod string
+}
+
+// runResult is what a command printed in one pod.
+type runResult struct {
+	out string
+	err error
+	dur time.Duration
+}
+
+// runningPodsOf: the running pods of each marked workload, and how many
+// each one has (by target key). A workload whose pods can't be listed is
+// reported and left out.
+func runningPodsOf(cl kube.Client, targets []target) ([]podRef, map[string]int) {
+	var pods []podRef
+	perTarget := map[string]int{}
+	for _, t := range targets {
+		names, err := cl.RunningPods(t.c.Name, t.Namespace, t.Selector)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, tui.Err.Render(fmt.Sprintf("  %s %s/%s: %v", t.c.Short, t.Namespace, t.Name, err)))
+			continue
+		}
+		perTarget[t.key()] = len(names)
+		for _, p := range names {
+			pods = append(pods, podRef{t, p})
+		}
 	}
-	results := make([]result, len(pods))
+	return pods, perTarget
+}
+
+// execInPods runs command in every pod, at most 8 at a time; the results
+// are in the order of pods.
+func execInPods(cl kube.Client, pods []podRef, container string, command []string) []runResult {
+	results := make([]runResult, len(pods))
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	for i, p := range pods {
@@ -112,11 +125,16 @@ func (a *app) krun(args []string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			out, err := cl.Exec(ctx, p.t.c.Name, p.t.Namespace, p.pod, container, command)
-			results[i] = result{out, err, time.Since(start)}
+			results[i] = runResult{out, err, time.Since(start)}
 		}()
 	}
 	wg.Wait()
+	return results
+}
 
+// printRunResults prints each pod's last lines of output in plan order,
+// then the summary; it fails when any pod did.
+func printRunResults(pods []podRef, results []runResult) error {
 	failed := 0
 	for i, p := range pods {
 		r := results[i]
@@ -171,14 +189,8 @@ func parseKrunArgs(args []string) (filter, container string, command []string, e
 // askCommand prompts for the command after the pick ("" cancels).
 func askCommand(targets []target) []string {
 	fmt.Fprintf(os.Stderr, "%s %s\n", tui.Bold.Render("Command to run in"), describeTargets(targets))
-	fmt.Fprint(os.Stderr, tui.Dim.Render("  e.g. nginx -s reload · empty cancels")+"\n  > ")
-	tty, err := os.Open("/dev/tty")
-	if err != nil {
-		return nil
-	}
-	defer tty.Close()
-	line, _ := bufio.NewReader(tty).ReadString('\n')
-	return strings.Fields(strings.TrimSpace(line))
+	line, _ := tui.AskLine(tui.Dim.Render("  e.g. nginx -s reload · empty cancels") + "\n  > ")
+	return strings.Fields(line)
 }
 
 func describeTargets(ts []target) string {

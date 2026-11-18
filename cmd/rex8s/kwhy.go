@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -33,7 +32,7 @@ func (a *app) kwhy(filter string) error {
 	if rex.Block() == "" {
 		return a.whytail(sel.C.Name, sel.V.Namespace, sel.V.Name)
 	}
-	return rex.SplitBehind("why "+sel.V.Name, filepath.Join(a.binDir, "rex8s"), "whytail", sel.C.Name, sel.V.Namespace, sel.V.Name)
+	return rex.SplitBehind("why "+sel.V.Name, filepath.Join(a.binDir, "rex8s"), "_why", sel.C.Name, sel.V.Namespace, sel.V.Name)
 }
 
 // aiCommand resolves the CLI used by kwhy (config ai_command).
@@ -99,8 +98,7 @@ func (a *app) whytail(ctxName, ns, podName string) error {
 	if runErr != nil {
 		fmt.Println(tui.Err.Render("\n" + filepath.Base(ai) + ": " + runErr.Error()))
 	}
-	fmt.Fprint(os.Stderr, tui.Dim.Render("\npress enter to close"))
-	bufio.NewReader(os.Stdin).ReadString('\n')
+	waitClose("")
 	return nil
 }
 

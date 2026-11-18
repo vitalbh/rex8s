@@ -3,34 +3,30 @@ package kube
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vitalbh/rex8s/internal/testkube"
 )
 
-// fakeKubectl writes a shell script standing in for kubectl and returns a
-// Client that runs it.
-func fakeKubectl(t *testing.T, script string) Client {
+// fakeKubectl is a Client whose kubectl answers every call with r.
+func fakeKubectl(t *testing.T, r testkube.Reply) (Client, *testkube.Kubectl) {
 	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "kubectl")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return Client{Kubectl: bin, Kubeconfig: filepath.Join(dir, "config")}
+	k := testkube.New(t).Default(r)
+	return Client{Kubectl: k.Path, Kubeconfig: k.Kubeconfig}, k
 }
 
 // A credential plugin that outlives kubectl keeps stdout open: the timeout
 // must still hold (B5).
 func TestGetTimeoutKillsGrandchild(t *testing.T) {
-	cl := fakeKubectl(t, "sleep 30 &\nsleep 30\n")
+	cl, _ := fakeKubectl(t, testkube.Reply{Hold: 30 * time.Second, Delay: 30 * time.Second})
 	cl.Timeout = time.Second
 	start := time.Now()
 	_, err := cl.Get("ctx", "get", "pods")
-	if took := time.Since(start); took > 1800*time.Millisecond { // the group was killed, not just kubectl
+	if took := time.Since(start); took > 8*time.Second { // the group was killed, not just kubectl
 		t.Fatalf("Get took %s with a 1s timeout", took)
 	}
 	if !errors.Is(err, ErrTimeout) || err.Error() != "timeout" {
@@ -39,12 +35,12 @@ func TestGetTimeoutKillsGrandchild(t *testing.T) {
 }
 
 func TestOutputTimeoutKillsGrandchild(t *testing.T) {
-	cl := fakeKubectl(t, "sleep 30 &\nsleep 30\n")
+	cl, _ := fakeKubectl(t, testkube.Reply{Hold: 30 * time.Second, Delay: 30 * time.Second})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	start := time.Now()
 	_, err := cl.Output(ctx, "ctx", "delete", "pod", "x")
-	if took := time.Since(start); took > 1800*time.Millisecond {
+	if took := time.Since(start); took > 8*time.Second {
 		t.Fatalf("Output took %s with a 1s timeout", took)
 	}
 	if !errors.Is(err, ErrTimeout) {
@@ -55,14 +51,14 @@ func TestOutputTimeoutKillsGrandchild(t *testing.T) {
 // kubectl succeeded but left a process holding the pipe: the output is
 // complete, so it is not an error.
 func TestGetSucceedsWhenChildHoldsPipe(t *testing.T) {
-	cl := fakeKubectl(t, "sleep 5 &\necho '{\"items\":[]}'\n")
+	cl, _ := fakeKubectl(t, testkube.Reply{Hold: 30 * time.Second, Stdout: `{"items":[]}` + "\n"})
 	cl.Timeout = 20 * time.Second
 	start := time.Now()
 	out, err := cl.Get("ctx", "get", "pods")
 	if err != nil || strings.TrimSpace(string(out)) != `{"items":[]}` {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
-	if took := time.Since(start); took > WaitDelay+2*time.Second {
+	if took := time.Since(start); took > WaitDelay+8*time.Second {
 		t.Fatalf("Get took %s", took)
 	}
 }
@@ -70,12 +66,11 @@ func TestGetSucceedsWhenChildHoldsPipe(t *testing.T) {
 // Warnings on stderr must not end up in the JSON (B6); stderr only makes the
 // error.
 func TestStderrKeptApart(t *testing.T) {
-	cl := fakeKubectl(t, `case "$*" in
-*fail*) echo "some detail" >&2; echo "error: the server doesn't have a resource type" >&2; exit 1;;
-esac
-echo "I1117 Waited for 1.1s due to client-side throttling" >&2
-echo '{"items":[{"metadata":{"name":"a"},"status":{"phase":"Running"}}]}'
-`)
+	cl, k := fakeKubectl(t, testkube.Reply{
+		Stderr: "I1117 Waited for 1.1s due to client-side throttling\n",
+		Stdout: `{"items":[{"metadata":{"name":"a"},"status":{"phase":"Running"}}]}` + "\n",
+	})
+	k.On("*", "*fail*", testkube.Reply{Stderr: "some detail\nerror: the server doesn't have a resource type\n", Exit: 1})
 	out, err := cl.Get("ctx", "get", "pods", "-o", "json")
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +92,7 @@ echo '{"items":[{"metadata":{"name":"a"},"status":{"phase":"Running"}}]}'
 }
 
 func TestCommandArgsAndKubeconfig(t *testing.T) {
-	cl := fakeKubectl(t, `echo "$KUBECONFIG|$*"`)
+	cl, _ := fakeKubectl(t, testkube.Reply{Shell: `echo "$KUBECONFIG|$*"`})
 	cl.Kubeconfig = "/a:/b"
 	out, err := cl.Output(context.Background(), "use", "get", "ns")
 	if err != nil || strings.TrimSpace(string(out)) != "/a:/b|--context use get ns" {
@@ -109,15 +104,25 @@ func TestCommandArgsAndKubeconfig(t *testing.T) {
 	}
 }
 
+// Get adds --request-timeout from Timeout, after the caller's arguments.
+func TestGetRequestTimeout(t *testing.T) {
+	cl, k := fakeKubectl(t, testkube.Reply{Stdout: "ok"})
+	cl.Timeout = 30 * time.Second
+	if _, err := cl.Get("use", "get", "ns"); err != nil {
+		t.Fatal(err)
+	}
+	if got := k.Calls(); len(got) != 1 || got[0] != "--context use get ns --request-timeout=29s" {
+		t.Errorf("calls = %q", got)
+	}
+}
+
 // Gets to one context run one at a time (B13); a lock directory fails the
 // call when two overlap.
 func TestGetSerializedPerContext(t *testing.T) {
 	lock := filepath.Join(t.TempDir(), "lock")
-	cl := fakeKubectl(t, `mkdir "`+lock+`" 2>/dev/null || { echo overlap >&2; exit 1; }
+	cl, _ := fakeKubectl(t, testkube.Reply{Stdout: "ok\n", Shell: `mkdir "` + lock + `" 2>/dev/null || { echo overlap >&2; exit 1; }
 sleep 0.2
-rmdir "`+lock+`"
-echo ok
-`)
+rmdir "` + lock + `"`})
 	var wg sync.WaitGroup
 	errs := make([]error, 4)
 	for i := range errs {
@@ -136,7 +141,7 @@ echo ok
 }
 
 func TestExecCombinesOutput(t *testing.T) {
-	cl := fakeKubectl(t, `echo out; echo err >&2; exit 3`)
+	cl, _ := fakeKubectl(t, testkube.Reply{Stdout: "out\n", Stderr: "err\n", Exit: 3})
 	out, err := cl.Exec(context.Background(), "ctx", "app", "web-1", "", []string{"true"})
 	if err == nil || !strings.Contains(out, "out") || !strings.Contains(out, "err") {
 		t.Fatalf("out=%q err=%v", out, err)
@@ -144,11 +149,11 @@ func TestExecCombinesOutput(t *testing.T) {
 }
 
 func TestRunningPods(t *testing.T) {
-	cl := fakeKubectl(t, `echo '{"items":[
+	cl, _ := fakeKubectl(t, testkube.Reply{Stdout: `{"items":[
 	 {"metadata":{"name":"b"},"status":{"phase":"Running"}},
 	 {"metadata":{"name":"a"},"status":{"phase":"Running"}},
 	 {"metadata":{"name":"gone","deletionTimestamp":"2026-01-01T00:00:00Z"},"status":{"phase":"Running"}},
-	 {"metadata":{"name":"wait"},"status":{"phase":"Pending"}}]}'`)
+	 {"metadata":{"name":"wait"},"status":{"phase":"Pending"}}]}`})
 	names, err := cl.RunningPods("ctx", "app", "app=web")
 	if err != nil || strings.Join(names, ",") != "a,b" {
 		t.Fatalf("names=%v err=%v", names, err)

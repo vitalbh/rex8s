@@ -1,2 +1,5 @@
 /bin/
 .DS_Store
+/cmd/rex8s/rex8s
+/cmd/rex8s-guard/rex8s-guard
+.claude/worktrees/

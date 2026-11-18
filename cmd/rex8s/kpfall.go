@@ -18,18 +18,6 @@ func serviceText(cs kube.On[kube.Service]) string {
 	return cs.C.Short + " " + cs.V.Namespace + "/" + cs.V.Name
 }
 
-// matchWords reports whether every word of filter is in text, ignoring case:
-// "grafana use" matches "use monitoring/grafana".
-func matchWords(text, filter string) bool {
-	t := strings.ToLower(text)
-	for _, w := range strings.Fields(strings.ToLower(filter)) {
-		if !strings.Contains(t, w) {
-			return false
-		}
-	}
-	return true
-}
-
 // kpfAll: kpf -A [FILTER] — the services of every cluster in one picker.
 // When FILTER matches a single service, it starts that one without asking.
 func (a *app) kpfAll(filter string) error {

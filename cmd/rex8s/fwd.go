@@ -58,11 +58,7 @@ func favURL(local int, path string) string {
 	return fmt.Sprintf("http://localhost:%d%s", local, path)
 }
 
-// kpfFavorite: kpf NAME — the favorite's forward (started in the background
-// when it doesn't run), opened in the browser.
-func (a *app) kpfFavorite(f config.Forward) error { return a.fwd(f.Name) }
-
-// fwd NAME (kpf NAME, Raycast): start the favorite's background forward
+// fwd NAME (kpf NAME, kpf -f, rex8s _fwd from Raycast): start the favorite's background forward
 // unless it runs, then open its URL in the browser.
 func (a *app) fwd(name string) error {
 	f, ok := a.favorite(name)
@@ -124,7 +120,7 @@ func (a *app) kpfFavorites() error {
 		return err
 	}
 	f, _ := a.favorite(it.Key)
-	return a.kpfFavorite(f)
+	return a.fwd(f.Name)
 }
 
 type favoriteJSON struct {

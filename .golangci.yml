@@ -1,0 +1,20 @@
+version: "2"
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  disable:
+    # most unchecked errors here are best-effort writes to a terminal, a
+    # cache file or a temp file; checking them all would add noise, not safety
+    - errcheck
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -ST1000 # package comments everywhere
+        - -ST1003 # naming (initialisms)
+        - -ST1005 # error strings: some are full sentences shown to the user
+        - -ST1016 # receiver names
+        - -ST1020 # doc comments start with the name: "Name: ..." reads fine
+        - -ST1021
+        - -ST1022
+        - -QF* # quick fixes are style suggestions, not bugs

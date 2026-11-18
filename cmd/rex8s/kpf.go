@@ -13,7 +13,7 @@ import (
 
 // kpf: pick a service (and port) — every namespace, this pane's first; -n
 // only this namespace; -A every cluster — and port-forward it in the
-// background (pfbg), printing the URL. kpf -l lists the running ones;
+// background (rex8s _pf), printing the URL. kpf -l lists the running ones;
 // kpf --stop PID stops one (for Raycast); kpf --gc cleans up after forwards
 // that died.
 func (a *app) kpf(args []string) error {
@@ -69,7 +69,7 @@ func (a *app) kpf(args []string) error {
 			return a.registry().Stop(pid)
 		}
 		if f, ok := a.favorite(args[0]); ok {
-			return a.kpfFavorite(f)
+			return a.fwd(f.Name)
 		}
 		filter = args[0]
 	}

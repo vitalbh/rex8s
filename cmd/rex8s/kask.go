@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,14 +114,7 @@ func (a *app) kask(args []string) error {
 	if rex.Block() == "" {
 		return a.asktail(c.Name, ns, file)
 	}
-	return rex.Split("ask "+c.Short, filepath.Join(a.binDir, "rex8s"), "asktail", c.Name, ns, file)
-}
-
-func nsOr(ns string) string {
-	if ns == "" {
-		return "default"
-	}
-	return ns
+	return rex.Split("ask "+c.Short, filepath.Join(a.binDir, "rex8s"), "_ask", c.Name, ns, file)
 }
 
 // askAgent: claude or codex (config ask_agent; default claude, else codex
@@ -186,7 +178,7 @@ unless prefixed with REX8S_FORCE=1 — only do that after the engineer explicitl
 Logs may contain secrets or personal data: never repeat tokens, passwords or keys back.
 Be concise: diagnosis with evidence first, then the fix.`
 
-// asktail runs the Claude conversation in its own pane, with kubectl scoped
+// asktail (rex8s _ask) runs the Claude conversation in its own pane, with kubectl scoped
 // to the cluster and namespace like a rex8s pane.
 func (a *app) asktail(ctxName, ns, file string) error {
 	c, err := a.context(ctxName)
@@ -245,13 +237,12 @@ func (a *app) asktail(ctxName, ns, file string) error {
 	cmd.Env = setEnv(os.Environ(), "KUBECONFIG", kube.PaneKubeconfig(cfgPath, a.src),
 		"PATH", pathx.Prepend(a.binDir), "REX8S", "1", "REX8S_AGENT", "1")
 	if err := cmd.Run(); err != nil {
-		fmt.Fprint(os.Stderr, tui.Dim.Render("\nclaude ended ("+err.Error()+") · press enter to close"))
-		bufio.NewReader(os.Stdin).ReadString('\n')
+		waitClose("claude ended (" + err.Error() + ")")
 	}
 	return nil
 }
 
-// askpod gathers one pod's context and opens the conversation in this pane
+// askpod (rex8s _askpod) gathers one pod's context and opens the conversation in this pane
 // (kfail's "ask" and the Raycast action use it).
 func (a *app) askpod(ctxName, ns, podName string) error {
 	c, err := a.context(ctxName)

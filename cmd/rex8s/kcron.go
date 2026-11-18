@@ -15,14 +15,7 @@ import (
 //
 //	kcron [DURATION] [FILTER]   default the next 6h; e.g. kcron 24h backup
 func (a *app) kcron(args []string) error {
-	window, filter := 6*time.Hour, ""
-	for _, arg := range args {
-		if d, err := time.ParseDuration(arg); err == nil && d > 0 {
-			window = d
-		} else {
-			filter = arg
-		}
-	}
+	window, filter := parseKcronArgs(args)
 	// each cluster's CronJobs, and its Jobs for how the last runs went
 	type cronSet struct {
 		crons []kube.CronJob
@@ -42,13 +35,7 @@ func (a *app) kcron(args []string) error {
 	}
 
 	now := time.Now()
-	type run struct {
-		at    time.Time
-		c     kube.Context
-		cj    kube.CronJob
-		state string
-	}
-	var runs []run
+	var runs []cronRun
 	suspended, bad := 0, 0
 	f := strings.ToLower(filter)
 	for _, r := range res.Rows {
@@ -67,7 +54,7 @@ func (a *app) kcron(args []string) error {
 			}
 			state := cronState(cj, r.V.jobs)
 			for _, t := range spec.runs(now, now.Add(window), 500) {
-				runs = append(runs, run{t, r.C, cj, state})
+				runs = append(runs, cronRun{t, r.C, cj, state})
 			}
 		}
 	}
@@ -78,6 +65,35 @@ func (a *app) kcron(args []string) error {
 		return runs[i].c.Short < runs[j].c.Short
 	})
 
+	fmt.Print(renderCronRuns(runs, window, suspended, bad))
+	printSkipped(res.Skipped)
+	return nil
+}
+
+// parseKcronArgs: kcron [DURATION] [FILTER]; the window is 6h by default.
+func parseKcronArgs(args []string) (window time.Duration, filter string) {
+	window = 6 * time.Hour
+	for _, arg := range args {
+		if d, err := time.ParseDuration(arg); err == nil && d > 0 {
+			window = d
+		} else {
+			filter = arg
+		}
+	}
+	return window, filter
+}
+
+// cronRun is one coming run of a CronJob.
+type cronRun struct {
+	at    time.Time
+	c     kube.Context
+	cj    kube.CronJob
+	state string // of its last run: cronState
+}
+
+// renderCronRuns: the timeline of runs (sorted by time), by day, with each
+// CronJob's runs folded after the third, and the summary line.
+func renderCronRuns(runs []cronRun, window time.Duration, suspended, bad int) string {
 	// a job running every few minutes floods the list: fold its runs
 	type key struct{ ctx, ns, name string }
 	count := map[key]int{}
@@ -135,7 +151,5 @@ func (a *app) kcron(args []string) error {
 		summary += fmt.Sprintf(" · %d schedule(s) not understood", bad)
 	}
 	b.WriteString("\n" + tui.Dim.Render(summary) + "\n")
-	fmt.Print(b.String())
-	printSkipped(res.Skipped)
-	return nil
+	return b.String()
 }

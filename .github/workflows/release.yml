@@ -16,6 +16,12 @@ on:
 permissions:
   contents: write
 
+# one run per tag at a time: a second push or a manual re-run of the same tag
+# waits instead of uploading over a release in progress
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -32,6 +38,9 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go vet ./... && go test ./...
+      # most of the archives are for macOS: vet that build too
+      - name: vet for macOS
+        run: GOOS=darwin GOARCH=arm64 go vet ./... && GOOS=darwin GOARCH=amd64 go vet ./...
       - name: build
         run: |
           set -eu
@@ -43,11 +52,20 @@ jobs:
             dir=rex8s_${os}_${arch}
             mkdir -p "dist/$dir"
             GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o "dist/$dir/rex8s" ./cmd/rex8s
-            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "dist/$dir/rex8s-guard" ./cmd/rex8s-guard
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o "dist/$dir/rex8s-guard" ./cmd/rex8s-guard
             cp README.md LICENSE "dist/$dir/"   # rex8s setup writes the Lua file and the commands
             tar -C dist -czf "dist/$dir.tar.gz" "$dir"
           done
           (cd dist && sha256sum *.tar.gz > checksums.txt)
+      # the runner is linux/amd64: run that build before anything is published
+      # (a broken -ldflags or a binary that does not start stops here)
+      - name: smoke test
+        run: |
+          set -eu
+          got=$(dist/rex8s_linux_amd64/rex8s version)
+          guard=$(dist/rex8s_linux_amd64/rex8s-guard --version)
+          echo "rex8s $got, rex8s-guard $guard"
+          test "$got" = "$TAG" && test "$guard" = "$TAG"
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}

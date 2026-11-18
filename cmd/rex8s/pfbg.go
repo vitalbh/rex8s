@@ -16,7 +16,7 @@ import (
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
-// lazyStart holds a local port for svc:port in the background (pfbg) and
+// lazyStart holds a local port for svc:port in the background (rex8s _pf) and
 // prints how to use it. A forward already serving the same port is reused.
 func (a *app) lazyStart(c kube.Context, ns, svc string, port kube.ServicePort) error {
 	e, reused, err := a.lazyEnsure(c, ns, svc, port, 0)
@@ -39,11 +39,11 @@ func (a *app) lazyEnsure(c kube.Context, ns, svc string, port kube.ServicePort, 
 // detectKind: what speaks on a service port (forward.DetectKind).
 func detectKind(p kube.ServicePort) forward.Kind { return forward.DetectKind(p) }
 
-// pfopen CTX NS SVC PORT (Raycast's Port-forward): the background forward
+// rex8s _pfopen CTX NS SVC PORT (Raycast's Port-forward): the background forward
 // of that service port, opened in the browser when it speaks HTTP.
 func (a *app) pfopen(args []string) error {
 	if len(args) < 4 {
-		return errors.New("pfopen CTX NS SVC PORT")
+		return errors.New("_pfopen CTX NS SVC PORT")
 	}
 	c, err := a.context(args[0])
 	if err != nil {
@@ -107,12 +107,12 @@ func shortDur(d time.Duration) string {
 	return s
 }
 
-// pfbg CTX NS SVC LOCAL:REMOTE KIND: the background side of lazyStart. It
+// rex8s _pf CTX NS SVC LOCAL:REMOTE KIND: the background side of lazyStart. It
 // serves the listener lazyEnsure handed it (or listens on LOCAL), registers
 // itself, and runs until stopped or unused for forward_expire.
 func (a *app) pfbg(args []string) error {
 	if len(args) < 5 {
-		return errors.New("pfbg CTX NS SVC LOCAL:REMOTE KIND")
+		return errors.New("_pf CTX NS SVC LOCAL:REMOTE KIND")
 	}
 	c, err := a.context(args[0])
 	if err != nil {

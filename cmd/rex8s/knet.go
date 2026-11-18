@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -27,7 +25,7 @@ func (a *app) knet() error {
 	if rex.Block() == "" {
 		return a.nettail(c.Name, ns)
 	}
-	return rex.Split("net "+ns, filepath.Join(a.binDir, "rex8s"), "nettail", c.Name, ns)
+	return rex.Split("net "+ns, filepath.Join(a.binDir, "rex8s"), "_net", c.Name, ns)
 }
 
 func (a *app) nettail(ctxName, ns string) error {
@@ -57,8 +55,7 @@ func (a *app) nettail(ctxName, ns string) error {
 	defer cancel()
 	_, _ = cl.Output(ctx, ctxName, "-n", ns, "delete", "pod", name, "--ignore-not-found", "--wait=false")
 	if runErr != nil {
-		fmt.Fprint(os.Stderr, tui.Dim.Render("\nshell ended ("+runErr.Error()+") · press enter to close"))
-		bufio.NewReader(os.Stdin).ReadString('\n')
+		waitClose("shell ended (" + runErr.Error() + ")")
 	}
 	return nil
 }

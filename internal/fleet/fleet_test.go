@@ -2,8 +2,6 @@ package fleet
 
 import (
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,6 +11,7 @@ import (
 
 	"github.com/vitalbh/rex8s/internal/config"
 	"github.com/vitalbh/rex8s/internal/kube"
+	"github.com/vitalbh/rex8s/internal/testkube"
 )
 
 func TestUnique(t *testing.T) {
@@ -104,27 +103,14 @@ func TestSort(t *testing.T) {
 // counted in a file.
 func fakeKubectl(t *testing.T) (kube.Client, func() int) {
 	t.Helper()
-	dir := t.TempDir()
-	calls := filepath.Join(dir, "calls")
-	script := `#!/bin/sh
-echo x >> "` + calls + `"
-case "$2" in
-ok-*) echo '{"items":[{"metadata":{"name":"web-1","namespace":"app"},"status":{"phase":"Running"}}]}';;
-expired) echo "error: You must be logged in to the server (Unauthorized)" >&2; exit 1;;
-slow) sleep 10;;
-garbage) echo 'not json';;
-*) echo "error: context $2 does not exist" >&2; exit 1;;
-esac
-`
-	bin := filepath.Join(dir, "kubectl")
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	count := func() int {
-		b, _ := os.ReadFile(calls)
-		return strings.Count(string(b), "x")
-	}
-	return kube.Client{Kubectl: bin, Kubeconfig: filepath.Join(dir, "config"), Timeout: 10 * time.Second}, count
+	k := testkube.New(t).
+		On("ok-*", "*", testkube.Reply{Stdout: `{"items":[{"metadata":{"name":"web-1","namespace":"app"},"status":{"phase":"Running"}}]}`}).
+		On("expired", "*", testkube.Reply{Stderr: "error: You must be logged in to the server (Unauthorized)\n", Exit: 1}).
+		On("slow", "*", testkube.Reply{Delay: 10 * time.Second}).
+		On("garbage", "*", testkube.Reply{Stdout: "not json\n"}).
+		Default(testkube.Reply{Shell: `echo "error: context $2 does not exist" >&2`, Exit: 1})
+	count := func() int { return k.Count("") }
+	return kube.Client{Kubectl: k.Path, Kubeconfig: k.Kubeconfig, Timeout: 10 * time.Second}, count
 }
 
 func pods(_ kube.Context, out [][]byte) ([]kube.Pod, error) { return kube.ParsePods(out[0]) }
@@ -220,9 +206,14 @@ func TestTimeoutIsBackedOff(t *testing.T) {
 	if time.Since(start) > 3*time.Second || len(res.Skipped) != 1 || res.Skipped[0].Reason != "timeout" {
 		t.Fatalf("first read: %+v after %s", res, time.Since(start))
 	}
+	// the first call may be killed before the fake records it on a loaded
+	// machine: compare before and after the second read
+	time.Sleep(200 * time.Millisecond)
+	before := calls()
 	Read(r, []kube.Context{slow}, podQuery, pods)
-	if calls() != 1 {
-		t.Errorf("kubectl ran %d times; the timed-out cluster should be backed off", calls())
+	time.Sleep(200 * time.Millisecond)
+	if calls() != before {
+		t.Errorf("kubectl ran again (%d → %d); the timed-out cluster should be backed off", before, calls())
 	}
 }
 

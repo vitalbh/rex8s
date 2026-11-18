@@ -51,12 +51,12 @@ func (a *app) kjobsAll(state, filter string) error {
 	}
 	printSkipped(res.Skipped)
 
-	jobsByKey, cronsByKey, cronStates := map[string]kube.Job{}, map[string]kube.CronJob{}, map[string]string{}
+	ix := newJobIndex()
 	clusterOf := map[string]int{} // key → index in ps
 	var rows []jobRow
 	for i, p := range ps {
 		prefix := strconv.Itoa(i) + "|"
-		for _, r := range jobRows(p.jobs, p.crons, state, prefix, fmt.Sprintf("%-*s  ", wc, p.c.Short), w, jobsByKey, cronsByKey, cronStates) {
+		for _, r := range jobRows(jobRowsIn{jobs: p.jobs, crons: p.crons, state: state, keyPrefix: prefix, labelPrefix: fmt.Sprintf("%-*s  ", wc, p.c.Short), width: w}, ix) {
 			clusterOf[r.item.Key] = i
 			rows = append(rows, r)
 		}
@@ -85,25 +85,25 @@ func (a *app) kjobsAll(state, filter string) error {
 		Items: items,
 		Query: filter,
 		PreviewHead: func(it tui.Item) string {
-			if cj, ok := cronsByKey[it.Key]; ok {
-				return cronHead(cj, cronStates[it.Key])
+			if cj, ok := ix.crons[it.Key]; ok {
+				return cronHead(cj, ix.states[it.Key])
 			}
-			return jobHead(jobsByKey[it.Key])
+			return jobHead(ix.jobs[it.Key])
 		},
 		PreviewBody: func(it tui.Item) string {
 			p := ps[clusterOf[it.Key]]
-			if cj, ok := cronsByKey[it.Key]; ok {
+			if cj, ok := ix.crons[it.Key]; ok {
 				return cronRuns(cj, p.jobs)
 			}
-			return jobBody(cl, p.c.Name, jobsByKey[it.Key])
+			return jobBody(cl, p.c.Name, ix.jobs[it.Key])
 		},
 	})
 	if err != nil || it == nil {
 		return err
 	}
 	c := ps[clusterOf[it.Key]].c
-	if cj, ok := cronsByKey[it.Key]; ok {
+	if cj, ok := ix.crons[it.Key]; ok {
 		return a.cronAction(c, cj)
 	}
-	return a.jobAction(c, cl, jobsByKey[it.Key])
+	return a.jobAction(c, cl, ix.jobs[it.Key])
 }

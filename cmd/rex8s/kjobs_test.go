@@ -35,7 +35,7 @@ func TestCronStateAndItems(t *testing.T) {
 		t.Errorf("sitemap: %q, want suspended", s)
 	}
 
-	items, err := jobItems(jobs, crons, "", map[string]kube.Job{}, map[string]kube.CronJob{}, map[string]string{})
+	items, err := jobItems(jobs, crons, "", newJobIndex())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestCronStateAndItems(t *testing.T) {
 	}
 
 	for state, n := range map[string]int{"failed": 1, "running": 1, "done": 1, "cron": 2, "suspended": 1} {
-		items, err := jobItems(jobs, crons, state, map[string]kube.Job{}, map[string]kube.CronJob{}, map[string]string{})
+		items, err := jobItems(jobs, crons, state, newJobIndex())
 		if err != nil || len(items) != n {
 			t.Errorf("state %s: %d items (%v), want %d", state, len(items), err, n)
 		}

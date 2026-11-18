@@ -456,13 +456,13 @@ var jobTab = kviewTab[jobsAndCrons]{
 		objs, names := map[string]any{}, map[string]string{}
 		var rows []jobRow
 		for _, r := range read {
-			jobsByKey, cronsByKey, cronStates := map[string]kube.Job{}, map[string]kube.CronJob{}, map[string]string{}
-			rows = append(rows, jobRows(r.V.jobs, r.V.crons, "", "job|"+r.C.Name+"|", k.row(r.C, ""), w, jobsByKey, cronsByKey, cronStates)...)
-			for key, j := range jobsByKey {
+			ix := newJobIndex()
+			rows = append(rows, jobRows(jobRowsIn{jobs: r.V.jobs, crons: r.V.crons, keyPrefix: "job|" + r.C.Name + "|", labelPrefix: k.row(r.C, ""), width: w}, ix)...)
+			for key, j := range ix.jobs {
 				objs[key] = kvJob{c: r.C, job: &j}
 				names[key] = kvName(r.C, "job", j.Namespace+"/"+j.Name)
 			}
-			for key, cj := range cronsByKey {
+			for key, cj := range ix.crons {
 				objs[key] = kvJob{c: r.C, cron: &cj}
 				names[key] = kvName(r.C, "cronjob", cj.Namespace+"/"+cj.Name)
 			}

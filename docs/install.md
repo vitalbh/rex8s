@@ -38,7 +38,7 @@ clear that with `xattr -d com.apple.quarantine rex8s_darwin_arm64/rex8s*`.
 Go 1.26+:
 
 ```sh
-make install        # tests, builds, then rex8s setup
+make install        # builds, then rex8s setup (make check runs the tests)
 ```
 
 ## What setup does

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -93,7 +92,6 @@ func (a *app) kwarnAll(names []string) error {
 		}()
 	}
 	wg.Wait()
-	fmt.Fprint(os.Stderr, tui.Dim.Render("\nwatch ended · press enter to close"))
-	bufio.NewReader(os.Stdin).ReadString('\n')
+	waitClose("watch ended")
 	return nil
 }

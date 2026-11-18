@@ -219,10 +219,3 @@ func mostCommon(tags map[string]string) string {
 	}
 	return best
 }
-
-func clip(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
-}

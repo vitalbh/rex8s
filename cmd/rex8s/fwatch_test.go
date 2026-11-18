@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/vitalbh/rex8s/internal/kube"
@@ -48,39 +47,41 @@ func TestEvaluate(t *testing.T) {
 	}
 }
 
-func TestDiffKeys(t *testing.T) {
-	added, removed := diffKeys(map[string]int{"a": 1, "b": 1}, map[string]int{"b": 1, "c": 1})
-	if len(added) != 1 || added[0] != "c" || len(removed) != 1 || removed[0] != "a" {
-		t.Fatalf("added=%v removed=%v", added, removed)
-	}
+func dep(name string, gen, obs int64, desired, updated, ready int) kube.Workload {
+	return kube.Workload{Kind: "Deployment", Namespace: "app", Name: name, Generation: gen, Observed: obs,
+		Desired: desired, Updated: updated, Available: ready, KsName: "apps", KsNamespace: "flux-system"}
 }
 
-func TestShellSplit(t *testing.T) {
-	got, err := shellSplit(`kubectl config set-credentials "my user" --auth-provider-arg='id-token=a b' --x=c\ d`)
-	if err != nil {
-		t.Fatal(err)
+func TestEvaluateRollout(t *testing.T) {
+	ks := map[string]bool{"flux-system/apps": true}
+	baseline := map[string]baselineEntry{
+		"Deployment/app/api": {generation: 4}, "Deployment/app/web": {generation: 7},
+		"Deployment/app/broken": {generation: 2}, "Deployment/app/stuck": {generation: 3, failed: true},
 	}
-	want := []string{"kubectl", "config", "set-credentials", "my user", "--auth-provider-arg=id-token=a b", "--x=c d"}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Fatalf("got %q", got)
-	}
-	if _, err := shellSplit(`kubectl "open`); err == nil {
-		t.Fatal("unterminated quote must fail")
-	}
-}
+	stuck := dep("stuck", 3, 3, 2, 1, 1) // rollout stuck before we started: ignored
+	stuck.Failed = true
+	broken := dep("broken", 2, 2, 1, 1, 0) // fully updated but unhealthy before we started: ignored
 
-func TestMatchWords(t *testing.T) {
-	for _, c := range []struct {
-		text, filter string
-		want         bool
+	cases := []struct {
+		name string
+		ws   []kube.Workload
+		want watchPhase
 	}{
-		{"use monitoring/grafana", "grafana", true},
-		{"use monitoring/grafana", "Grafana USE", true},
-		{"use monitoring/grafana", "grafana euw", false},
-		{"use monitoring/grafana", "", true},
-	} {
-		if got := matchWords(c.text, c.filter); got != c.want {
-			t.Errorf("matchWords(%q, %q) = %v", c.text, c.filter, got)
+		{"nothing touched", []kube.Workload{dep("api", 4, 4, 2, 2, 2), broken, stuck}, phaseDone},
+		{"rolling", []kube.Workload{dep("api", 5, 5, 2, 1, 1), dep("web", 7, 7, 3, 3, 3), broken}, phaseRollout},
+		{"rolled out", []kube.Workload{dep("api", 5, 5, 2, 2, 2), broken}, phaseDone},
+		{"new workload rolling", []kube.Workload{dep("new", 1, 1, 1, 1, 0)}, phaseRollout},
+		{"other kustomization ignored", []kube.Workload{{Kind: "Deployment", Name: "x", Generation: 9, KsName: "other", KsNamespace: "flux-system"}}, phaseDone},
+	}
+	for _, tc := range cases {
+		if got := evaluateRollout(tc.ws, baseline, ks); got.phase != tc.want {
+			t.Errorf("%s: phase = %d, want %d (%+v)", tc.name, got.phase, tc.want, got)
 		}
+	}
+
+	failed := dep("api", 5, 5, 2, 1, 1)
+	failed.Failed, failed.Message = true, "ReplicaSet api-x has timed out progressing."
+	if got := evaluateRollout([]kube.Workload{failed}, baseline, ks); got.phase != phaseFailed {
+		t.Fatalf("deadline exceeded must fail: %+v", got)
 	}
 }

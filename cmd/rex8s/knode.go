@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -101,7 +99,7 @@ func (a *app) knode(filter string) error {
 	if rex.Block() == "" {
 		return a.nodetail(c.Name, it.Key)
 	}
-	return rex.Split("node "+it.Key, filepath.Join(a.binDir, "rex8s"), "nodetail", c.Name, it.Key)
+	return rex.Split("node "+it.Key, filepath.Join(a.binDir, "rex8s"), "_node", c.Name, it.Key)
 }
 
 // nodetail runs the node shell in its own pane. Production asks first.
@@ -145,8 +143,7 @@ func (a *app) nodetail(ctxName, nodeName string) error {
 		}
 	}
 	if runErr != nil {
-		fmt.Fprint(os.Stderr, tui.Dim.Render("\nshell ended ("+runErr.Error()+") · press enter to close"))
-		bufio.NewReader(os.Stdin).ReadString('\n')
+		waitClose("shell ended (" + runErr.Error() + ")")
 	}
 	return nil
 }

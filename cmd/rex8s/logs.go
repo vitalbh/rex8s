@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -163,8 +162,7 @@ func (a *app) logtail(ctxName, ns, podName, container string, lo logOpts) error 
 		_ = f.Copy(pipe, a.logLinks(ctxName, ns), containerLabel, pod)
 		_ = cmd.Wait()
 	}
-	fmt.Fprint(os.Stderr, tui.Dim.Render("\nlogs ended · press enter to close"))
-	bufio.NewReader(os.Stdin).ReadString('\n')
+	waitClose("logs ended")
 	return nil
 }
 

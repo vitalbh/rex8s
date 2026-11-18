@@ -107,7 +107,7 @@ func TestRegistryGC(t *testing.T) {
 	}
 }
 
-// TestHelperPfbg is a fake `rex8s pfbg CTX NS SVC LOCAL:REMOTE KIND`: it
+// TestHelperPfbg is a fake `rex8s _pf CTX NS SVC LOCAL:REMOTE KIND`: it
 // serves the listener Ensure handed it and registers itself.
 func TestHelperPfbg(t *testing.T) {
 	if os.Getenv("FAKE_PFBG_DIR") == "" {
@@ -155,7 +155,7 @@ func fakeRegistry(t *testing.T, env ...string) Registry {
 		t.Setenv(env[i], env[i+1])
 	}
 	r := Registry{Dir: dir, Bin: bin}
-	t.Cleanup(func() { // no pfbg left running
+	t.Cleanup(func() { // no _pf left running
 		for _, e := range r.List() {
 			syscall.Kill(e.PID, syscall.SIGKILL)
 		}

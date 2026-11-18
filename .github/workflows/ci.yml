@@ -20,12 +20,25 @@ jobs:
         with:
           go-version-file: go.mod
       - name: gofmt
-        run: test -z "$(gofmt -l cmd internal)" || { gofmt -l cmd internal; exit 1; }
+        run: test -z "$(gofmt -l cmd internal rex)" || { gofmt -l cmd internal rex; exit 1; }
       - run: go vet ./...
       - name: vet for macOS
         run: GOOS=darwin GOARCH=arm64 go vet ./...
-      - run: go test ./...
+      # -race also runs the end-to-end test (demo mode, python3 from the runner)
+      - run: go test -race ./...
       - run: make build
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # built with the go.mod Go, so it understands the code; keep the version
+      # in step with GOLANGCI_LINT_VERSION in the Makefile
+      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+      - run: golangci-lint run ./...
 
   raycast:
     runs-on: ubuntu-latest

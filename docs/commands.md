@@ -12,7 +12,7 @@ background.
 
 - [Keys](#keys) · [Panes](#panes) · [Browse](#browse) · [What's broken](#whats-broken) ·
   [Logs](#logs) · [Ask Claude](#ask-claude) · [Reach a service or a pod](#reach-a-service-or-a-pod) ·
-  [Flux / GitOps](#flux--gitops) · [Across clusters](#across-clusters)
+  [Flux / GitOps](#flux--gitops) · [Across clusters](#across-clusters) · [rex8s subcommands](#rex8s-subcommands)
 
 ## Keys
 
@@ -255,3 +255,23 @@ and production: `kview PROD use/payments`, `kview PROD all`.
   debug pods (`knode`, `knet`, `kubectl debug`), Failed/Evicted pods over a day
   old, Jobs finished over a week ago (not a CronJob's) and Released PVs. Mark
   and delete; production asks once (type the cluster names).
+
+## rex8s subcommands
+
+`rex8s help` lists every subcommand; the `k*` commands above run them
+(`klogs` is `rex8s logs`). The ones without a `k*` command are what the key
+bindings, the palette and Raycast run:
+
+| | |
+|---|---|
+| `rex8s pick [tab\|layout]` · `rex8s pane CTX [NS]` | the ⇧⌘J/⇧⌘K picker tab, and the isolated shell it becomes |
+| `rex8s browser CTX [NS]` · `rex8s events CTX [NS]` | the left pane of the ⇧⌘K layout (above) · `kubectl get events -w` |
+| `rex8s label` · `rex8s restore` | refresh this pane's label · reopen the cluster tabs lost when the Rex server restarted |
+| `rex8s monitor` | the Flux monitor (palette) |
+| `rex8s guard TOOL ARGS…` | what the `kubectl`/`helm`/`flux` wrappers run: the production guard |
+| `rex8s list KIND …` · `rex8s freconcile CTX KIND NS NAME` | JSON and one-line answers for launchers ([Raycast](raycast.md)) |
+| `rex8s version` · `rex8s help` | the version · every subcommand |
+
+The subcommands that start with `_` (`rex8s _logs`, `_exec`, `_pf`…) are the
+panes and background processes the other commands open; `rex8s help` leaves
+them out.

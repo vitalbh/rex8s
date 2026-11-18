@@ -1,4 +1,4 @@
--- Kubernetes: one cluster per pane. Logic lives in k8s/bin/rex8s.
+-- Kubernetes: one cluster per pane. Logic lives in ~/.config/rex/rex8s/bin/rex8s.
 local SHELL = "com.superlogical.terminal.shell"
 local K8S   = os.getenv("HOME") .. "/.config/rex/rex8s/bin/rex8s"
 
@@ -63,7 +63,7 @@ rex.action{
         term(with_ns({ K8S, "browser", args.ctx }, args.ns), "kview"),
         rex.layout.vertical(0.65,
           term(with_ns({ K8S, "pane", "--layout", args.ctx }, args.ns), "k8s"),
-          term(with_ns({ K8S, "warnings", args.ctx }, args.ns), "warnings"))),
+          term(with_ns({ K8S, "_warnings", args.ctx }, args.ns), "warnings"))),
     })
   end,
 }
@@ -73,7 +73,7 @@ rex.action{
   name = "k8s_logs", title = "Kubernetes: Pod Logs (ctx, ns, pod)", category = "Kubernetes",
   args = { ctx = "string", ns = "string", pod = "string", container = "string?" },
   run  = function(ctx, args)
-    local argv = { K8S, "logtail", args.ctx, args.ns, args.pod }
+    local argv = { K8S, "_logs", args.ctx, args.ns, args.pod }
     if args.container and args.container ~= "" then argv[#argv + 1] = args.container end
     return opened(rex.session.new_window{ layout = term(argv, "logs " .. args.pod) })
   end,
@@ -84,7 +84,7 @@ rex.action{
   name = "k8s_why", title = "Kubernetes: Explain Pod (ctx, ns, pod)", category = "Kubernetes",
   args = { ctx = "string", ns = "string", pod = "string" },
   run  = function(ctx, args)
-    return opened(rex.session.new_window{ layout = term({ K8S, "whytail", args.ctx, args.ns, args.pod }, "why " .. args.pod) })
+    return opened(rex.session.new_window{ layout = term({ K8S, "_why", args.ctx, args.ns, args.pod }, "why " .. args.pod) })
   end,
 }
 
@@ -93,7 +93,7 @@ rex.action{
   name = "k8s_ask", title = "Kubernetes: Ask Claude about Pod (ctx, ns, pod)", category = "Kubernetes",
   args = { ctx = "string", ns = "string", pod = "string" },
   run  = function(ctx, args)
-    return opened(rex.session.new_window{ layout = term({ K8S, "askpod", args.ctx, args.ns, args.pod }, "ask " .. args.pod) })
+    return opened(rex.session.new_window{ layout = term({ K8S, "_askpod", args.ctx, args.ns, args.pod }, "ask " .. args.pod) })
   end,
 }
 
@@ -102,7 +102,7 @@ rex.action{
   name = "k8s_exec", title = "Kubernetes: Shell into Pod (ctx, ns, pod)", category = "Kubernetes",
   args = { ctx = "string", ns = "string", pod = "string", container = "string?" },
   run  = function(ctx, args)
-    local argv = { K8S, "exectail", args.ctx, args.ns, args.pod }
+    local argv = { K8S, "_exec", args.ctx, args.ns, args.pod }
     if args.container and args.container ~= "" then argv[#argv + 1] = args.container end
     return opened(rex.session.new_window{ layout = term(argv, "exec " .. args.pod) })
   end,
@@ -122,7 +122,7 @@ rex.action{
   name = "k8s_pf", title = "Kubernetes: Port-forward (ctx, ns, svc, port)", category = "Kubernetes",
   args = { ctx = "string", ns = "string", svc = "string", port = "number" },
   run  = function(ctx, args)
-    return background({ K8S, "pfopen", args.ctx, args.ns, args.svc, tostring(math.floor(args.port)) })
+    return background({ K8S, "_pfopen", args.ctx, args.ns, args.svc, tostring(math.floor(args.port)) })
   end,
 }
 
@@ -153,7 +153,7 @@ rex.action{
   name = "k8s_wlogs", title = "Kubernetes: Workload Logs (specs, grep)", category = "Kubernetes",
   args = { specs = "string", grep = "string?", label = "string?" },
   run  = function(ctx, args)
-    local argv = { K8S, "wlogtail" }
+    local argv = { K8S, "_wlogs" }
     if args.grep and args.grep ~= "" then argv[#argv + 1] = "--grep=" .. args.grep end
     for spec in string.gmatch(args.specs, "[^\n]+") do argv[#argv + 1] = spec end
     return opened(rex.session.new_window{ layout = term(argv, args.label or "logs") })
@@ -246,7 +246,7 @@ rex.action{
       layout = rex.layout.horizontal(0.55,
         rex.layout.vertical(0.6,
           term({ K8S, "kstatus", "-w", "--context", args.ctx }, "status"),
-          term({ K8S, "warnings", args.ctx }, "warnings")),
+          term({ K8S, "_warnings", args.ctx }, "warnings")),
         rex.layout.vertical(0.5,
           rex.layout.block{ flavor = SHELL, label = "changes",
             options = { command = { "/bin/sh", "-c", changes, K8S, args.ctx }, shell = "none" } },
@@ -261,7 +261,7 @@ rex.action{
   name = "k8s_fwd", title = "Kubernetes: Favorite Port-forward (name)", category = "Kubernetes",
   args = { name = "string" },
   run  = function(ctx, args)
-    return background({ K8S, "fwd", args.name })
+    return background({ K8S, "_fwd", args.name })
   end,
 }
 

@@ -91,13 +91,13 @@ func (k *kview) podAction(v kube.On[kube.Pod], key string) tui.Result {
 	c, p := v.C, v.V
 	switch key {
 	case "l":
-		argv := []string{"logtail", c.Name, p.Namespace, p.Name}
+		argv := []string{"_logs", c.Name, p.Namespace, p.Name}
 		if len(p.Containers) > 1 {
 			argv = append(argv, "*")
 		}
 		return k.split(false, "logs "+p.Name, argv...)
 	case "s":
-		argv := []string{"exectail", c.Name, p.Namespace, p.Name}
+		argv := []string{"_exec", c.Name, p.Namespace, p.Name}
 		status := ""
 		if len(p.Containers) > 1 {
 			argv = append(argv, p.Containers[0])
@@ -118,9 +118,9 @@ func (k *kview) podAction(v kube.On[kube.Pod], key string) tui.Result {
 		if _, err := k.a.aiCommand(); err != nil {
 			return tui.Result{Err: err}
 		}
-		return k.split(false, "why "+p.Name, "whytail", c.Name, p.Namespace, p.Name)
+		return k.split(false, "why "+p.Name, "_why", c.Name, p.Namespace, p.Name)
 	case "a":
-		return k.split(true, "ask "+p.Name, "askpod", c.Name, p.Namespace, p.Name)
+		return k.split(true, "ask "+p.Name, "_askpod", c.Name, p.Namespace, p.Name)
 	case "ctrl+d":
 		return k.guarded(c, "-n", p.Namespace, "delete", "pod", p.Name)
 	}
@@ -145,7 +145,7 @@ func (k *kview) workloadAction(v kube.On[kube.Workload], key string) tui.Result 
 			return tui.Result{Err: errors.New(ref + " has no matchLabels selector")}
 		}
 		spec := logSpec{c.Name, w.Namespace, w.Selector, c.Short + " " + w.Name}
-		return k.split(false, "logs "+w.Name, "wlogtail", spec.String())
+		return k.split(false, "logs "+w.Name, "_wlogs", spec.String())
 	case "r":
 		return k.guarded(c, "-n", w.Namespace, "rollout", "restart", ref)
 	case "d":
@@ -243,7 +243,7 @@ func (k *kview) jobAction(v kvJob, key string) tui.Result {
 	j := *v.job
 	switch key {
 	case "l":
-		return k.split(false, "logs "+j.Name, "logtail", c.Name, j.Namespace, "job/"+j.Name)
+		return k.split(false, "logs "+j.Name, "_logs", c.Name, j.Namespace, "job/"+j.Name)
 	case "r":
 		if j.Cron == "" {
 			return tui.Result{Err: errors.New("job/" + j.Name + " is not from a CronJob: nothing to rerun")}
@@ -261,7 +261,7 @@ func (k *kview) nodeAction(v kube.On[kube.Node], key string) tui.Result {
 	c, n := v.C, v.V
 	switch key {
 	case "s":
-		return k.split(true, "node "+n.Name, "nodetail", c.Name, n.Name)
+		return k.split(true, "node "+n.Name, "_node", c.Name, n.Name)
 	case "d":
 		return k.text(c, "describe node "+n.Name, "describe", "node", n.Name)
 	case "y":

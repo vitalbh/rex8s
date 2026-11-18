@@ -731,26 +731,3 @@ func statusWarnings(cl kube.Client, ctxName string) section {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────
-
-func listMore(items []string, n int) string {
-	if len(items) <= n {
-		return strings.Join(items, " · ")
-	}
-	return strings.Join(items[:n], " · ") + tui.Dim.Render(fmt.Sprintf(" · … %d more", len(items)-n))
-}
-
-func firstNonEmpty(ss ...string) string {
-	for _, s := range ss {
-		if s != "" {
-			return s
-		}
-	}
-	return ""
-}
-
-func plural(n int, word string) string {
-	if n == 1 {
-		return "1 " + word
-	}
-	return fmt.Sprintf("%d %ss", n, word)
-}

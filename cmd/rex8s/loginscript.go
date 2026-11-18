@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -58,13 +57,6 @@ func (s step) String() string {
 		return strings.Join(s.argv[:4], " ")
 	}
 	return strings.Join(s.argv, " ")
-}
-
-func tildePath(p string) string {
-	if h, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, h+"/") {
-		return "~" + p[len(h):]
-	}
-	return p
 }
 
 var (

@@ -87,14 +87,13 @@ func TestStreamWarningsCleansText(t *testing.T) {
 	}
 }
 
-func TestLogRef(t *testing.T) {
-	for _, c := range []struct{ in, kind, name, title string }{
-		{"web-7d9f", "", "web-7d9f", "use/web-7d9f"},
-		{"job/migrate", "job", "migrate", "use/migrate (job)"},
-	} {
-		k, n := logRef(c.in)
-		if k != c.kind || n != c.name || logTitle("use", k, n) != c.title {
-			t.Errorf("%q: %q %q %q", c.in, k, n, logTitle("use", k, n))
-		}
+func TestStreamWarningsDedup(t *testing.T) {
+	ev := `{"metadata":{"uid":"u1","namespace":"app"},"involvedObject":{"kind":"Pod","name":"api-1"},"reason":"BackOff","message":"Back-off restarting failed container","count":5,"lastTimestamp":"2026-11-04T10:00:00Z"}`
+	ev2 := `{"metadata":{"uid":"u2","namespace":"app"},"involvedObject":{"kind":"Pod","name":"api-2"},"reason":"Unhealthy","message":"Readiness probe failed","count":1,"lastTimestamp":"2026-11-04T10:00:01Z"}`
+	var out strings.Builder
+	streamWarnings(strings.NewReader(ev+"\n"+ev+"\n"+ev2+"\n"), &out, true, nil)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "app pod/api-1") || !strings.Contains(lines[0], "x5") {
+		t.Fatalf("got:\n%s", out.String())
 	}
 }

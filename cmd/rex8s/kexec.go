@@ -1,15 +1,11 @@
 package main
 
 import (
-	"bufio"
-	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
-	"github.com/vitalbh/rex8s/internal/tui"
 )
 
 // kexec: pick a pod (and container) and open a shell in it, in a pane next
@@ -43,7 +39,7 @@ func (a *app) shellIn(ctxName string, p kube.Pod) error {
 	if rex.Block() == "" {
 		return a.exectail(ctxName, p.Namespace, p.Name, container)
 	}
-	argv := []string{filepath.Join(a.binDir, "rex8s"), "exectail", ctxName, p.Namespace, p.Name}
+	argv := []string{filepath.Join(a.binDir, "rex8s"), "_exec", ctxName, p.Namespace, p.Name}
 	if container != "" {
 		argv = append(argv, container)
 	}
@@ -76,8 +72,7 @@ func (a *app) exectail(ctxName, ns, podName, container string) error {
 	}
 	args = append(args, "--", "sh", "-c", "if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi")
 	if err := cl.Run(ctxName, args...); err != nil {
-		fmt.Fprint(os.Stderr, tui.Dim.Render("\nshell ended ("+err.Error()+") · press enter to close"))
-		bufio.NewReader(os.Stdin).ReadString('\n')
+		waitClose("shell ended (" + err.Error() + ")")
 	}
 	return nil
 }

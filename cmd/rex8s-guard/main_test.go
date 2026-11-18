@@ -123,3 +123,9 @@ func TestPrompt(t *testing.T) {
 		t.Errorf("zsh prompt = %q", out)
 	}
 }
+
+func TestVersion(t *testing.T) {
+	if out, _, code := runGuard(t, nil, "--version"); out != "dev\n" || code != 0 {
+		t.Errorf("--version = %q, exit %d", out, code)
+	}
+}

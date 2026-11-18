@@ -197,12 +197,3 @@ func colorDiff(l string) string {
 	}
 	return l
 }
-
-// accessError explains why a cluster can't be queried, pointing at kauth when
-// the login expired.
-func accessError(c kube.Context, err error) string {
-	if kube.AuthExpired(err) {
-		return tui.Warn.Render("login expired") + tui.Dim.Render(" · run: kauth "+c.Short)
-	}
-	return tui.Err.Render("no access: " + truncate(err.Error(), 120))
-}

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,7 +12,7 @@ import (
 	"github.com/vitalbh/rex8s/internal/tui"
 )
 
-// The background port-forwards (pfbg) are kept in forward.Registry, in
+// The background port-forwards (rex8s _pf) are kept in forward.Registry, in
 // ~/.cache/rex8s/pf: `kpf -l` and the Raycast menu bar list and stop them.
 
 func (a *app) registry() forward.Registry {
@@ -73,13 +71,7 @@ func (a *app) kpfList() error {
 			fmt.Println("copied " + e.URL())
 		}
 	case "save":
-		fmt.Fprint(os.Stderr, tui.Bold.Render("Favorite name")+tui.Dim.Render(" (enter: "+e.Service+")")+"\n  > ")
-		name := ""
-		if tty, err := os.Open("/dev/tty"); err == nil {
-			line, _ := bufio.NewReader(tty).ReadString('\n')
-			tty.Close()
-			name = strings.TrimSpace(line)
-		}
+		name, _ := tui.AskLine(tui.Bold.Render("Favorite name") + tui.Dim.Render(" (enter: "+e.Service+")") + "\n  > ")
 		saved, err := a.saveFavorite(e, name)
 		if err != nil {
 			return err

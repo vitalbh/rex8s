@@ -128,7 +128,7 @@ func (a *app) kjobsCluster(c kube.Context, allNS bool, state, filter string) err
 	}
 
 	var jobs []kube.Job
-	jobsByKey, cronsByKey, cronStates := map[string]kube.Job{}, map[string]kube.CronJob{}, map[string]string{}
+	ix := newJobIndex()
 	title := "Jobs on " + where
 	if state != "" {
 		title += " · " + state
@@ -152,32 +152,32 @@ func (a *app) kjobsCluster(c kube.Context, allNS bool, state, filter string) err
 			if err != nil {
 				return nil, err
 			}
-			return jobItems(jobs, crons, state, jobsByKey, cronsByKey, cronStates)
+			return jobItems(jobs, crons, state, ix)
 		},
 		PreviewHead: func(it tui.Item) string {
-			if cj, ok := cronsByKey[it.Key]; ok {
-				return cronHead(cj, cronStates[it.Key])
+			if cj, ok := ix.crons[it.Key]; ok {
+				return cronHead(cj, ix.states[it.Key])
 			}
-			return jobHead(jobsByKey[it.Key])
+			return jobHead(ix.jobs[it.Key])
 		},
 		PreviewBody: func(it tui.Item) string {
-			if cj, ok := cronsByKey[it.Key]; ok {
+			if cj, ok := ix.crons[it.Key]; ok {
 				return cronRuns(cj, jobs)
 			}
-			return jobBody(cl, c.Name, jobsByKey[it.Key])
+			return jobBody(cl, c.Name, ix.jobs[it.Key])
 		},
 	})
 	if err != nil || it == nil {
 		return err
 	}
-	if cj, ok := cronsByKey[it.Key]; ok {
+	if cj, ok := ix.crons[it.Key]; ok {
 		return a.cronAction(c, cj)
 	}
-	return a.jobAction(c, cl, jobsByKey[it.Key])
+	return a.jobAction(c, cl, ix.jobs[it.Key])
 }
 
-func jobItems(jobs []kube.Job, crons []kube.CronJob, state string, jobsByKey map[string]kube.Job, cronsByKey map[string]kube.CronJob, cronStates map[string]string) ([]tui.Item, error) {
-	rows := jobRows(jobs, crons, state, "", "", jobNameWidth(jobs, crons), jobsByKey, cronsByKey, cronStates)
+func jobItems(jobs []kube.Job, crons []kube.CronJob, state string, ix jobIndex) ([]tui.Item, error) {
+	rows := jobRows(jobRowsIn{jobs: jobs, crons: crons, state: state, width: jobNameWidth(jobs, crons)}, ix)
 	if len(rows) == 0 {
 		if state != "" {
 			return nil, fmt.Errorf("no %s jobs", state)
@@ -209,19 +209,42 @@ func jobNameWidth(jobs []kube.Job, crons []kube.CronJob) int {
 	return w
 }
 
-// jobRows: one row per Job and CronJob that passes state; keyPrefix and
-// labelPrefix tell clusters apart in kjobs -A ("" for one cluster).
-func jobRows(jobs []kube.Job, crons []kube.CronJob, state, keyPrefix, labelPrefix string, w int, jobsByKey map[string]kube.Job, cronsByKey map[string]kube.CronJob, cronStates map[string]string) []jobRow {
+// jobIndex finds, by picker key, the Job or CronJob behind each row and
+// the CronJob's state, for previews and actions.
+type jobIndex struct {
+	jobs   map[string]kube.Job
+	crons  map[string]kube.CronJob
+	states map[string]string // cron key → cronState
+}
+
+func newJobIndex() jobIndex {
+	return jobIndex{jobs: map[string]kube.Job{}, crons: map[string]kube.CronJob{}, states: map[string]string{}}
+}
+
+// jobRowsIn: the Jobs and CronJobs of one cluster, and how their rows look.
+type jobRowsIn struct {
+	jobs  []kube.Job
+	crons []kube.CronJob
+	state string // failed, running, done, suspended or cron; "" all
+
+	keyPrefix, labelPrefix string // several clusters in one list
+	width                  int    // of the name column
+}
+
+// jobRows: one row per Job and CronJob that passes in.state, each recorded
+// in ix; the prefixes tell clusters apart in kjobs -A and kview -A.
+func jobRows(in jobRowsIn, ix jobIndex) []jobRow {
+	jobs, crons, state, w := in.jobs, in.crons, in.state, in.width
 	var rows []jobRow
 	if state != "cron" && state != "suspended" {
 		for _, j := range jobs {
 			if state != "" && j.State != state {
 				continue
 			}
-			key := keyPrefix + "job/" + j.Namespace + "/" + j.Name
-			jobsByKey[key] = j
+			key := in.keyPrefix + "job/" + j.Namespace + "/" + j.Name
+			ix.jobs[key] = j
 			rank := map[string]int{"failed": 0, "running": 1, "done": 3}[j.State]
-			rows = append(rows, jobRow{rank, j.Start, tui.Item{Key: key, Label: labelPrefix + fmt.Sprintf("job  %-*s", w, j.Namespace+"/"+j.Name), Hint: jobHint(j), Badge: j.Badge()}})
+			rows = append(rows, jobRow{rank, j.Start, tui.Item{Key: key, Label: in.labelPrefix + fmt.Sprintf("job  %-*s", w, j.Namespace+"/"+j.Name), Hint: jobHint(j), Badge: j.Badge()}})
 		}
 	}
 	if state == "" || state == "cron" || state == "suspended" {
@@ -230,9 +253,9 @@ func jobRows(jobs []kube.Job, crons []kube.CronJob, state, keyPrefix, labelPrefi
 			if state == "suspended" && !cj.Suspend {
 				continue
 			}
-			key := keyPrefix + "cron/" + cj.Namespace + "/" + cj.Name
-			cronsByKey[key], cronStates[key] = cj, st
-			rows = append(rows, jobRow{2, cj.LastRun, tui.Item{Key: key, Label: labelPrefix + fmt.Sprintf("cron %-*s", w, cj.Namespace+"/"+cj.Name), Hint: cronHint(cj, st), Badge: cronBadge(st)}})
+			key := in.keyPrefix + "cron/" + cj.Namespace + "/" + cj.Name
+			ix.crons[key], ix.states[key] = cj, st
+			rows = append(rows, jobRow{2, cj.LastRun, tui.Item{Key: key, Label: in.labelPrefix + fmt.Sprintf("cron %-*s", w, cj.Namespace+"/"+cj.Name), Hint: cronHint(cj, st), Badge: cronBadge(st)}})
 		}
 	}
 	return rows
@@ -345,7 +368,7 @@ func (a *app) jobAction(c kube.Context, cl kube.Client, j kube.Job) error {
 		if rex.Block() == "" {
 			return a.logtail(c.Name, j.Namespace, "job/"+j.Name, "", logOpts{})
 		}
-		return rex.SplitBehind("logs "+j.Name, filepath.Join(a.binDir, "rex8s"), "logtail", c.Name, j.Namespace, "job/"+j.Name)
+		return rex.SplitBehind("logs "+j.Name, filepath.Join(a.binDir, "rex8s"), "_logs", c.Name, j.Namespace, "job/"+j.Name)
 	case "describe":
 		return a.runKubectl(false, "--context", c.Name, "-n", j.Namespace, "describe", "job", j.Name)
 	case "events":

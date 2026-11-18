@@ -27,16 +27,7 @@ import (
 //
 // Production asks once (y/N) before deleting.
 func (a *app) kjunk(args []string) error {
-	cats := map[string]bool{}
-	filter := ""
-	for _, arg := range args {
-		switch c := strings.TrimSuffix(strings.ToLower(arg), "s"); c {
-		case "debug", "pod", "job", "pv":
-			cats[c] = true
-		default:
-			filter = arg
-		}
-	}
+	cats, filter := parseKjunkArgs(args)
 	raw, err := kube.Load(a.src)
 	if err != nil {
 		return err
@@ -86,16 +77,7 @@ func (a *app) kjunk(args []string) error {
 		}
 		return items, nil
 	}
-	title := "Clean up · space marks, ctrl+a marks all shown"
-	if len(cats) > 0 {
-		var cs []string
-		for c := range cats {
-			cs = append(cs, c)
-		}
-		sort.Strings(cs)
-		title += " · " + strings.Join(cs, ", ")
-	}
-	its, err := tui.RunMulti(tui.Options{Title: title, Load: load, Query: filter})
+	its, err := tui.RunMulti(tui.Options{Title: kjunkTitle(cats), Load: load, Query: filter})
 	printSkipped(skipped)
 	if err != nil || len(its) == 0 {
 		return err
@@ -120,6 +102,38 @@ func (a *app) kjunk(args []string) error {
 	if ok, err := confirmChange(touched, fmt.Sprintf("kjunk: delete %d object(s)", len(chosen))); !ok {
 		return err
 	}
+	return deleteJunk(cl, chosen)
+}
+
+// parseKjunkArgs: kjunk [debug|pods|jobs|pv]... [FILTER].
+func parseKjunkArgs(args []string) (cats map[string]bool, filter string) {
+	cats = map[string]bool{}
+	for _, arg := range args {
+		switch c := strings.TrimSuffix(strings.ToLower(arg), "s"); c {
+		case "debug", "pod", "job", "pv":
+			cats[c] = true
+		default:
+			filter = arg
+		}
+	}
+	return cats, filter
+}
+
+func kjunkTitle(cats map[string]bool) string {
+	title := "Clean up · space marks, ctrl+a marks all shown"
+	if len(cats) > 0 {
+		var cs []string
+		for c := range cats {
+			cs = append(cs, c)
+		}
+		sort.Strings(cs)
+		title += " · " + strings.Join(cs, ", ")
+	}
+	return title
+}
+
+// deleteJunk deletes the chosen objects one by one, printing each result.
+func deleteJunk(cl kube.Client, chosen []junk) error {
 	failed := 0
 	for _, j := range chosen {
 		args := []string{"delete", j.kind, j.name, "--wait=false"}

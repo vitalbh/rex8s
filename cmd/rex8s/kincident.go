@@ -186,5 +186,5 @@ func (a *app) incidentReport(id string, ask bool) error {
 	if rex.Block() == "" {
 		return a.asktail(c.Name, nsOr(c.Namespace), file)
 	}
-	return rex.Split("ask "+in.ID, filepath.Join(a.binDir, "rex8s"), "asktail", c.Name, nsOr(c.Namespace), file)
+	return rex.Split("ask "+in.ID, filepath.Join(a.binDir, "rex8s"), "_ask", c.Name, nsOr(c.Namespace), file)
 }

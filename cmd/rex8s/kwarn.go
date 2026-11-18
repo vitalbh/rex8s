@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,8 +84,7 @@ func (a *app) warnings(ctxName, ns string) error {
 	fmt.Println(tui.Bold.Render("Warnings") + tui.Dim.Render(" · "+c.Short+" · "+scope+" · repeats shown at most once a minute"))
 	streamWarnings(out, os.Stdout, ns == "", nil)
 	err = cmd.Wait()
-	fmt.Fprint(os.Stderr, tui.Dim.Render("\nwatch ended · press enter to close"))
-	bufio.NewReader(os.Stdin).ReadString('\n')
+	waitClose("watch ended")
 	return err
 }
 

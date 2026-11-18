@@ -84,59 +84,68 @@ func (a *app) listData(args []string) (any, error) {
 	if len(args) == 0 {
 		return nil, errors.New("usage: rex8s list clusters|namespaces|pods|services [CTX] [NS]")
 	}
-	if args[0] == "flux" && len(args) == 1 {
-		return a.fluxHealthAll()
-	}
-	if args[0] == "failing" {
+	notify := len(args) > 1 && args[1] == "--notify"
+	switch args[0] {
+	case "flux":
+		if len(args) == 1 {
+			return a.fluxHealthAll()
+		}
+	case "failing":
 		out, err := a.failingAll()
-		if err == nil && len(args) > 1 && args[1] == "--notify" {
+		if err == nil && notify {
 			a.notifyNewBroken(out)
 		}
 		return out, err
-	}
-	if args[0] == "pf" { // with the URL and whether a browser opens it
-		type pfJSON struct {
-			forward.Entry
-			URL string `json:"url"`
-			Web bool   `json:"web"`
-		}
-		out := []pfJSON{}
-		for _, e := range a.pfList() {
-			out = append(out, pfJSON{e, e.URL(), e.Kind == "" || e.Kind.Web()})
-		}
-		return out, nil
-	}
-	if args[0] == "alerts" {
+	case "pf":
+		return a.pfJSON(), nil
+	case "alerts":
 		out, err := a.alertsAll()
-		if err == nil && len(args) > 1 && args[1] == "--notify" {
+		if err == nil && notify {
 			a.notifyNewCritical(out)
 		}
 		return out, err
-	}
-	if args[0] == "workloads" {
+	case "workloads":
 		return a.workloadsJSON()
-	}
-	if args[0] == "fwd" {
+	case "fwd":
 		return a.favoritesJSON(), nil
-	}
-	if args[0] == "clusters" {
-		raw, err := kube.Load(a.src)
-		if err != nil {
-			return nil, err
-		}
-		out := []clusterJSON{}
-		for _, c := range kube.Contexts(raw, a.cfg) {
-			out = append(out, clusterJSON{Context: c.Name, Short: c.Short, Prod: c.Prod, Server: c.Server, Namespace: c.Namespace, User: c.User, Current: c.Name == raw.CurrentContext})
-		}
-		return out, nil
+	case "clusters":
+		return a.clustersJSON()
 	}
 	if len(args) < 2 {
 		return nil, errors.New("missing context")
 	}
-	ctxName, ns := args[1], ""
-	if len(args) > 2 {
-		ns = args[2]
+	return a.listCluster(args[0], args[1], arg(args, 2))
+}
+
+// pfJSON: the running port-forwards, with the URL and whether a browser
+// opens it.
+func (a *app) pfJSON() any {
+	type pfJSON struct {
+		forward.Entry
+		URL string `json:"url"`
+		Web bool   `json:"web"`
 	}
+	out := []pfJSON{}
+	for _, e := range a.pfList() {
+		out = append(out, pfJSON{e, e.URL(), e.Kind == "" || e.Kind.Web()})
+	}
+	return out
+}
+
+func (a *app) clustersJSON() ([]clusterJSON, error) {
+	raw, err := kube.Load(a.src)
+	if err != nil {
+		return nil, err
+	}
+	out := []clusterJSON{}
+	for _, c := range kube.Contexts(raw, a.cfg) {
+		out = append(out, clusterJSON{Context: c.Name, Short: c.Short, Prod: c.Prod, Server: c.Server, Namespace: c.Namespace, User: c.User, Current: c.Name == raw.CurrentContext})
+	}
+	return out, nil
+}
+
+// listCluster: the lists of one cluster (every namespace when ns is "").
+func (a *app) listCluster(kind, ctxName, ns string) (any, error) {
 	if _, err := a.context(ctxName); err != nil {
 		return nil, err
 	}
@@ -149,7 +158,7 @@ func (a *app) listData(args []string) (any, error) {
 		scope = []string{"-n", ns}
 	}
 
-	switch args[0] {
+	switch kind {
 	case "flux":
 		items, installed, err := cl.FluxItems(ctxName)
 		if err != nil {
@@ -169,38 +178,48 @@ func (a *app) listData(args []string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		ps, err := kube.ParsePods(data)
-		if err != nil {
-			return nil, err
-		}
-		rank := map[string]int{"FAIL": 0, "WAIT": 1, "ok": 2, "done": 3}
-		sort.SliceStable(ps, func(i, j int) bool { return rank[ps[i].Badge()] < rank[ps[j].Badge()] })
-		out := make([]podJSON, 0, len(ps))
-		for _, p := range ps {
-			out = append(out, podJSON{Namespace: p.Namespace, Name: p.Name, Status: p.Status(), Badge: p.Badge(),
-				Ready: p.Ready, Total: p.Total, Restarts: p.Restarts, Age: kube.Age(p.Created), Containers: p.Containers})
-		}
-		return out, nil
+		return podsJSON(data)
 	case "services":
 		data, err := cl.Get(ctxName, append([]string{"get", "services", "-o", "json"}, scope...)...)
 		if err != nil {
 			return nil, err
 		}
-		ss, err := kube.ParseServices(data)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]serviceJSON, 0, len(ss))
-		for _, s := range ss {
-			sj := serviceJSON{Namespace: s.Namespace, Name: s.Name, Type: s.Type}
-			for _, p := range s.Ports {
-				sj.Ports = append(sj.Ports, portJSON{Name: p.Name, Port: p.Port})
-			}
-			out = append(out, sj)
-		}
-		return out, nil
+		return servicesJSON(data)
 	}
-	return nil, errors.New("unknown list: " + args[0])
+	return nil, errors.New("unknown list: " + kind)
+}
+
+// podsJSON: kubectl get pods -o json for launchers, broken first.
+func podsJSON(data []byte) ([]podJSON, error) {
+	ps, err := kube.ParsePods(data)
+	if err != nil {
+		return nil, err
+	}
+	rank := map[string]int{"FAIL": 0, "WAIT": 1, "ok": 2, "done": 3}
+	sort.SliceStable(ps, func(i, j int) bool { return rank[ps[i].Badge()] < rank[ps[j].Badge()] })
+	out := make([]podJSON, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, podJSON{Namespace: p.Namespace, Name: p.Name, Status: p.Status(), Badge: p.Badge(),
+			Ready: p.Ready, Total: p.Total, Restarts: p.Restarts, Age: kube.Age(p.Created), Containers: p.Containers})
+	}
+	return out, nil
+}
+
+// servicesJSON: kubectl get services -o json for launchers.
+func servicesJSON(data []byte) ([]serviceJSON, error) {
+	ss, err := kube.ParseServices(data)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]serviceJSON, 0, len(ss))
+	for _, s := range ss {
+		sj := serviceJSON{Namespace: s.Namespace, Name: s.Name, Type: s.Type}
+		for _, p := range s.Ports {
+			sj.Ports = append(sj.Ports, portJSON{Name: p.Name, Port: p.Port})
+		}
+		out = append(out, sj)
+	}
+	return out, nil
 }
 
 type fluxJSON struct {
@@ -371,7 +390,7 @@ type workloadJSON struct {
 	Selector  string `json:"selector"`
 	Image     string `json:"image"`
 	Tag       string `json:"tag"`
-	Spec      string `json:"spec"`   // for wlogtail: ctx|ns|selector|label
+	Spec      string `json:"spec"`   // for rex8s _wlogs: ctx|ns|selector|label
 	Target    string `json:"target"` // for kroll --target: ctx|kind|ns|name
 }
 

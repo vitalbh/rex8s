@@ -15,9 +15,16 @@ import (
 	"github.com/vitalbh/rex8s/internal/pathx"
 )
 
+// version is set at build time (-ldflags "-X main.version=v1.2.3").
+var version = "dev"
+
 func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "--prompt" {
 		prompt(os.Args[2:])
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(version)
 		return
 	}
 	if len(os.Args) < 2 {
