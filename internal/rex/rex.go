@@ -164,15 +164,30 @@ func split(focus bool, label string, argv ...string) error {
 
 // Status reports program status (OSC 7501) to the terminal: state is idle,
 // working, done, blocked, error or clear. id may be "" for the root record.
-func Status(id, state, title, msg string) {
+// A no-op outside Rex.
+func Status(id, state, title, msg string) { StatusKind(id, state, "", title, msg) }
+
+// StatusKind is Status with a kind, for state blocked: permission,
+// question or auth (a login to renew).
+func StatusKind(id, state, kind, title, msg string) {
+	if Block() == "" {
+		return
+	}
 	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
 	if err != nil {
 		return
 	}
 	defer tty.Close()
+	fmt.Fprint(tty, statusSeq(id, state, kind, title, msg))
+}
+
+func statusSeq(id, state, kind, title, msg string) string {
 	pairs := []string{"state=" + state, "app=rex8s"}
 	if id != "" {
 		pairs = append(pairs, "id="+id)
+	}
+	if kind != "" && state == "blocked" {
+		pairs = append(pairs, "kind="+kind)
 	}
 	if title != "" {
 		pairs = append(pairs, "title="+b64(title))
@@ -180,7 +195,7 @@ func Status(id, state, title, msg string) {
 	if msg != "" {
 		pairs = append(pairs, "msg="+b64(msg))
 	}
-	fmt.Fprintf(tty, "\x1b]7501;%s\x1b\\", strings.Join(pairs, ":"))
+	return "\x1b]7501;" + strings.Join(pairs, ":") + "\x1b\\"
 }
 
 // b64 encodes a single-line value for OSC 7501 (control characters removed,

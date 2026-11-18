@@ -174,8 +174,20 @@ func TestFollowSaysWhyPodsFail(t *testing.T) {
 	var out syncBuffer
 	f := &Follower{Client: cl, Out: &out, Poll: 50 * time.Millisecond, Retry: 30 * time.Millisecond,
 		Clusters: map[string]kube.Context{"use-admin": {Name: "use-admin", Short: "use"}}}
+	var states syncBuffer // what State heard, one line per call
+	f.State = func(s Spec, pods int, problem string) {
+		states.Write([]byte(s.Label + "|" + string(rune('0'+pods)) + "|" + problem + "\n"))
+	}
 	stop := follow(t, f, Spec{"use-admin", "app", "app=web", "use web"})
 	defer stop()
+	defer func() {
+		st := states.String()
+		for _, want := range []string{"use web|0|login expired · run kauth use\n", "use web|0|no running pods\n", "use web|1|\n"} {
+			if !strings.Contains(st, want) {
+				t.Errorf("State never heard %q:\n%s", want, st)
+			}
+		}
+	}()
 
 	waitFor(t, "a few retries", func() bool { return strings.Count(fc.calls(), " get pods ") >= 4 })
 	fc.write("err", "Unable to connect to the server: dial tcp: lookup api.example.com: no such host\n")

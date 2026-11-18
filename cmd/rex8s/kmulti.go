@@ -13,6 +13,7 @@ import (
 	"github.com/vitalbh/rex8s/internal/kube"
 	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
+	"golang.org/x/term"
 )
 
 // kmulti opens a tab with one pane per cluster — each an isolated rex8s
@@ -162,11 +163,19 @@ func showWindow(windowID string) {
 // included), as if you typed it in each: each runs it on its own cluster,
 // and production panes still ask before a change.
 func (a *app) kall(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: kall CMD... (e.g. kall kubectl get pods -n api)")
-	}
 	if rex.Block() == "" {
 		return errors.New("kall works in a Rex tab with cluster panes (kmulti)")
+	}
+	if len(args) == 0 { // the palette's kall: ask for the command
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return errors.New("usage: kall CMD... (e.g. kall kubectl get pods -n api)")
+		}
+		line, ok := tui.AskLine(tui.Bold.Render("Type in every cluster pane of this tab") +
+			tui.Dim.Render(" (e.g. get pods -n api; enter on nothing cancels)") + "\n  > ")
+		args = strings.Fields(line)
+		if !ok || len(args) == 0 {
+			return nil
+		}
 	}
 	cmd := args
 	if kubectlVerbs[cmd[0]] {

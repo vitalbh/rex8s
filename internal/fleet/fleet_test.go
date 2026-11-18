@@ -231,3 +231,30 @@ func TestServerAddr(t *testing.T) {
 		}
 	}
 }
+
+// An optional query that fails (a missing CRD) gives the parser nil; the
+// cluster still answers. A required one that fails skips it.
+func TestOptionalQuery(t *testing.T) {
+	k := testkube.New(t).
+		On("*", "get pods *", testkube.Reply{Stdout: "pods\n"}).
+		On("*", "get kustomizations *", testkube.Reply{Stderr: `error: the server doesn't have a resource type "kustomizations"` + "\n", Exit: 1}).
+		On("flux", "get helmreleases *", testkube.Reply{Stdout: "hr\n"})
+	r := &Reader{Client: kube.Client{Kubectl: k.Path, Kubeconfig: k.Kubeconfig, Timeout: 10 * time.Second}}
+	queries := [][]string{{"get", "pods", "-A"}, Optional("get", "kustomizations", "-A"), Optional("get", "helmreleases", "-A")}
+	res := Read(r, []kube.Context{{Name: "plain", Short: "use"}, {Name: "flux", Short: "euw"}}, queries,
+		func(_ kube.Context, out [][]byte) ([]string, error) {
+			var got []string
+			for _, o := range out {
+				got = append(got, strings.TrimSpace(string(o)))
+			}
+			return []string{strings.Join(got, ",")}, nil
+		})
+	if res.OK != 2 || len(res.Rows) != 2 || res.Rows[0].V != "pods,," || res.Rows[1].V != "pods,,hr" {
+		t.Errorf("rows = %+v, skipped %v", res.Rows, res.Strings())
+	}
+	res = Read(r, []kube.Context{{Name: "plain", Short: "use"}}, [][]string{{"get", "kustomizations", "-A"}},
+		func(kube.Context, [][]byte) ([]string, error) { return nil, nil })
+	if len(res.Skipped) != 1 {
+		t.Errorf("a required query that fails should skip the cluster: %+v", res)
+	}
+}

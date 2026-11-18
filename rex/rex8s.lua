@@ -301,7 +301,138 @@ rex.action{ name = "k8s_view_all", title = "Kubernetes: All Clusters (kview)", c
               return opened(rex.session.new_window{ layout = term({ K8S, "kview", "-A" }, "kview") })
             end }
 
+-- a floating pane in this tab running a rex8s picker; it closes when the
+-- picker is done, but stays (until enter) after an error or when what it
+-- printed is the point (REX8S_HOLD: a database's URL, a copied URL)
+local function floating(label, ...)
+  local script = 'REX8S_HOLD=1 "$0" "$@" || { printf "\\npress enter to close"; read -r _; }'
+  local cmd = { "/bin/sh", "-c", script, K8S }
+  for _, v in ipairs({ ... }) do cmd[#cmd + 1] = v end
+  check(rex.session.new_layer{
+    bounds = { 0.15, 0.15, 0.7, 0.6 }, focus = true,
+    layout = rex.layout.block{ flavor = SHELL, label = label, options = { command = cmd, shell = "none" } } })
+end
+
+-- palette: the favorite port-forwards (config forwards) in a picker; enter
+-- starts one in the background and opens it. A picker rather than an action
+-- per favorite: favorites saved from kpf -l show up without reloading Rex.
+rex.action{ name = "k8s_fwd_pick", title = "Kubernetes: Favorite Port-forwards…", category = "Kubernetes",
+            keywords = "k8s kpf port forward favorite favourite open service",
+            run = function(ctx, args) floating("kpf favorites", "kpf", "-f") end }
+
+-- palette: the running port-forwards (kpf -l): open, copy, save, stop
+rex.action{ name = "k8s_pf_list", title = "Kubernetes: Running Port-forwards (kpf -l)", category = "Kubernetes",
+            keywords = "k8s kpf port forward running list stop",
+            run = function(ctx, args) floating("kpf -l", "kpf", "-l") end }
+
+-- palette: kall — asks for a command and types it in every cluster pane of
+-- this tab (a kmulti tab); production panes still ask before a change
+rex.action{ name = "k8s_kall", title = "Kubernetes: Type in Every Cluster Pane (kall)…", category = "Kubernetes",
+            keywords = "k8s kall kmulti all panes broadcast send command",
+            run = function(ctx, args) floating("kall", "kall") end }
+
+-- What a pane is, from the label rex8s gives it: a cluster shell ("PROD
+-- use/api", "k8s staging/*") or a cluster browser ("kview PROD use/api",
+-- "kview use", "k9s k8s use/api"; "kview" before it names itself, "kview
+-- all" for -A). nil for anything else. A shell's record (what Restore
+-- reads) names its exact context; the label has the short name.
+local STATE = (os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state")) .. "/rex8s/panes/"
+
+local function pane_of(b)
+  local label = b and b.label or ""
+  if label == "kview" or label == "k9s" then return { view = true } end
+  local rest = label:match("^kview (.+)$") or label:match("^k9s (.+)$")
+  local view = rest ~= nil
+  if not view then
+    rest = label:match("^PROD (.+)$") or label:match("^k8s (.+)$")
+    if not rest then return nil end
+  end
+  rest = rest:gsub("^PROD ", "")
+  rest = rest:gsub("^k8s ", "")
+  local short, ns = rest:match("^([^/%s]+)/(%S+)$")
+  short = short or rest:match("^([^/%s]+)$")
+  if not short then return nil end
+  if view and short == "all" and not ns then return { view = true, all = true } end
+  local p = { view = view, short = short, ns = ns, ctx = short }
+  if not view then
+    local f = io.open(STATE .. tostring(b.block_id):gsub("^block:", "") .. ".json", "r")
+    if f then
+      local ok, rec = pcall(rex.json.decode, f:read("*a") or "")
+      f:close()
+      if ok and type(rec) == "table" and rec.short == short and rec.context then p.ctx = rec.context end
+    end
+  end
+  return p
+end
+
+-- the focused block and the other placed blocks of its tab
+local function focused_and_tab(ctx)
+  local list = check(rex.session.list_blocks{})
+  local me
+  for _, b in ipairs(list.blocks or {}) do
+    if b.block_id == ctx.block_id then me = b end
+  end
+  if not me then error("no focused pane", 0) end
+  local others = {}
+  for _, b in ipairs(list.blocks or {}) do
+    if b.block_id ~= me.block_id and b.window_id == me.window_id and b.placement == "placed" then
+      others[#others + 1] = b
+    end
+  end
+  return me, others
+end
+
+-- kview of a cluster in a split to the right of anchor, focused
+local function open_kview(anchor, p)
+  local argv = { K8S, "browser", p.ctx }
+  if p.ns then argv[#argv + 1] = p.ns end
+  check(rex.session.new_split{ anchor_id = anchor, direction = "horizontal", side = "after", ratio = 0.45,
+                               focus = true, layout = term(argv, "kview") })
+end
+
+local function not_cluster()
+  error("not a rex8s cluster pane (⇧⌘J opens one)", 0)
+end
+
+-- palette: kview of this pane's cluster (and namespace) in a split
+rex.action{ name = "k8s_kview_here", title = "Kubernetes: Open This Pane's Cluster in kview", category = "Kubernetes",
+            keywords = "k8s kview k9s browse this cluster pane split",
+            run = function(ctx, args)
+              local me = focused_and_tab(ctx)
+              local p = pane_of(me)
+              if not p or p.view then not_cluster() end
+              open_kview(me.block_id, p)
+            end }
+
+-- key: from a cluster shell to the kview of the same cluster in this tab
+-- (the ⇧⌘K layout's included), opening one in a split when there is none;
+-- from a kview back to a shell of its cluster
+rex.action{ name = "k8s_kview_toggle", title = "Kubernetes: Toggle Cluster Shell / kview", category = "Kubernetes",
+            keywords = "k8s kview k9s shell switch toggle focus cluster",
+            run = function(ctx, args)
+              local me, others = focused_and_tab(ctx)
+              local p = pane_of(me)
+              if not p then not_cluster() end
+              for _, b in ipairs(others) do
+                local q = pane_of(b)
+                local match = q and q.view ~= p.view and (
+                  (p.view and (p.all or not p.short or q.short == p.short)) or
+                  (not p.view and (not q.short or q.short == p.short)))
+                if match then
+                  check(rex.session.focus_block{ block_id = b.block_id })
+                  return
+                end
+              end
+              if not p.view then return open_kview(me.block_id, p) end
+              if p.all or not p.short then error("no cluster shell in this tab", 0) end
+              local argv = { K8S, "pane", p.ctx }
+              if p.ns then argv[#argv + 1] = p.ns end
+              check(rex.session.new_split{ anchor_id = me.block_id, direction = "horizontal", side = "after",
+                                           ratio = 0.6, focus = true, layout = term(argv, "k8s") })
+            end }
+
 rex.bind("shift+cmd+j", "k8s_pick")
 rex.bind("shift+cmd+k", "k8s_pick_layout")
 rex.bind("shift+cmd+m", "k8s_multi_pick")
 rex.bind("shift+cmd+v", "k8s_view_all")
+rex.bind("shift+cmd+i", "k8s_kview_toggle")

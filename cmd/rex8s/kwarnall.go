@@ -50,6 +50,13 @@ func (a *app) kwarnAll(names []string) error {
 	}
 	fmt.Println(tui.Bold.Render("Warnings") + tui.Dim.Render(" · "+strings.Join(shorts, " · ")+" · all namespaces · repeats shown at most once a minute · ctrl+c to stop"))
 
+	who := strings.Join(shorts, ",")
+	if len(shorts) > 3 {
+		who = fmt.Sprintf("%d clusters", len(shorts))
+	}
+	shown, stop := warnStatus(who)
+	defer stop()
+
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for i, c := range clusters {
@@ -62,6 +69,7 @@ func (a *app) kwarnAll(names []string) error {
 		go func() {
 			defer wg.Done()
 			seen := newWarnSeen() // across watches: a restarted watch relists
+			seen.shown = shown
 			for {
 				start := time.Now()
 				cmd := cl.Command(context.Background(), c.Name, "get", "events", "-A",

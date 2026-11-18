@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -143,15 +145,24 @@ func (a *app) logtail(ctxName, ns, podName, container string, lo logOpts) error 
 	default:
 		args = append(args, "-c", container)
 	}
+	tab := newTabStatus()
+	defer tab.Clear()
+	grep := ""
+	if lo.Grep != "" {
+		grep = " · grep " + lo.Grep
+	}
+	var stderr strings.Builder // kept for the tab status; still shown
 	cmd := cl.Command(context.Background(), ctxName, args...)
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	pipe, err := cmd.StdoutPipe()
 	if err == nil {
 		err = cmd.Start()
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, tui.Err.Render("cannot start kubectl: "+err.Error()))
+		tab.Set("error", "cannot start kubectl")
 	} else {
+		tab.Set("idle", "following "+logTitle(c.Short, kind, name)+grep)
 		containerLabel := func(_, c string) string { // only with --all-containers
 			if c == "" {
 				return ""
@@ -160,7 +171,17 @@ func (a *app) logtail(ctxName, ns, podName, container string, lo logOpts) error 
 		}
 		f := &logstream.Follower{Grep: re}
 		_ = f.Copy(pipe, a.logLinks(ctxName, ns), containerLabel, pod)
-		_ = cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+			why := lastLogLine(strings.TrimSpace(stderr.String()))
+			if kube.AuthExpired(errors.New(why)) {
+				why = "login expired · run kauth " + c.Short
+			} else if why == "" {
+				why = err.Error()
+			}
+			tab.Set("error", "logs ended: "+why)
+		} else {
+			tab.Set("idle", "logs ended")
+		}
 	}
 	waitClose("logs ended")
 	return nil

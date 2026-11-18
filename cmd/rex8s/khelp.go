@@ -15,7 +15,8 @@ var helpKeys = []struct{ keys, what string }{
 	{"⇧⌘K", "new tab: pick a cluster → kview · shell · warnings"},
 	{"⇧⌘V", "new tab: kview on every cluster"},
 	{"⇧⌘M", "new tab: pick clusters → one pane each, side by side"},
-	{"⌘⇧P", "palette: Kubernetes: Flux Monitor, Restore Cluster Tabs"},
+	{"⇧⌘I", "cluster shell ⇄ kview of the same cluster (opens one in a split)"},
+	{"⌘⇧P", "palette: Kubernetes: Flux Monitor, Restore Cluster Tabs, kpf favorites, kall…"},
 }
 
 // khelp: every rex8s command in a picker; enter runs the one under the cursor.

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/vitalbh/rex8s/internal/kube"
@@ -82,7 +83,11 @@ func (a *app) warnings(ctxName, ns string) error {
 		return err
 	}
 	fmt.Println(tui.Bold.Render("Warnings") + tui.Dim.Render(" · "+c.Short+" · "+scope+" · repeats shown at most once a minute"))
-	streamWarnings(out, os.Stdout, ns == "", nil)
+	seen := newWarnSeen()
+	var stop func()
+	seen.shown, stop = warnStatus(c.Short)
+	defer stop()
+	streamWarnings(out, os.Stdout, ns == "", seen)
 	err = cmd.Wait()
 	waitClose("watch ended")
 	return err
@@ -137,6 +142,8 @@ type warnSeen struct {
 	m      map[string]seenEvent // by event UID
 	now    func() time.Time
 	pruned time.Time
+	// shown, when set, hears of every event printed (the tab status count)
+	shown func(uid string, when time.Time)
 }
 
 type seenEvent struct {
@@ -168,7 +175,90 @@ func (s *warnSeen) show(uid string, when time.Time, count int) bool {
 	}
 	s.m[uid] = seenEvent{shown: now, when: when, count: count}
 	s.prune(now)
+	if s.shown != nil {
+		s.shown(uid, when)
+	}
 	return true
+}
+
+// warnWindow counts the Warning events that occurred in the last span, for
+// the tab status of kwarn: "use: 3 warnings in the last 10m". An event
+// counts once however often it repeats; a relisted old one doesn't count.
+type warnWindow struct {
+	mu   sync.Mutex
+	span time.Duration
+	last map[string]time.Time // event UID → its last occurrence
+	now  func() time.Time
+}
+
+const warnSpan = 10 * time.Minute
+
+func newWarnWindow(span time.Duration) *warnWindow {
+	return &warnWindow{span: span, last: map[string]time.Time{}, now: time.Now}
+}
+
+func (w *warnWindow) add(uid string, when time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if when.IsZero() {
+		when = w.now()
+	}
+	if when.After(w.last[uid]) {
+		w.last[uid] = when
+	}
+}
+
+func (w *warnWindow) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cutoff := w.now().Add(-w.span)
+	for uid, t := range w.last {
+		if t.Before(cutoff) {
+			delete(w.last, uid)
+		}
+	}
+	return len(w.last)
+}
+
+func (w *warnWindow) line(who string) string {
+	n := w.count()
+	if n == 0 {
+		return who + ": no warnings in the last " + shortDur(w.span)
+	}
+	return who + ": " + plural(n, "warning") + " in the last " + shortDur(w.span)
+}
+
+// warnStatus reports the window on the tab whenever a warning is shown and
+// every 30s (old ones fall out): done while there are some, idle without.
+// The returned func goes in warnSeen.shown; stop ends the reports and
+// clears the status.
+func warnStatus(who string) (shown func(string, time.Time), stop func()) {
+	tab := newTabStatus()
+	w := newWarnWindow(warnSpan)
+	report := func() {
+		if w.count() > 0 {
+			tab.Set("done", w.line(who))
+		} else {
+			tab.Set("idle", w.line(who))
+		}
+	}
+	report()
+	quit := make(chan struct{})
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				report()
+			case <-quit:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func(uid string, when time.Time) { w.add(uid, when); report() },
+		func() { once.Do(func() { close(quit); tab.Clear() }) }
 }
 
 func (s *warnSeen) prune(now time.Time) {

@@ -726,6 +726,53 @@ free() { printf '              total        used        free\nMem:          63Gi
 """
 
 
+# ── kfind ────────────────────────────────────────────────────────────────
+def find_objects(kind, ctx):
+    """Objects of one kind (by its resource name), with kind set."""
+    base = kind.split(".")[0]
+    def named(k, items):
+        return [dict(o, kind=k) for o in items]
+    def meta(k, pairs, age_d=40):
+        return [{"kind": k, "metadata": {"namespace": n, "name": m, "creationTimestamp": ts(age_d * 86400)}} for n, m in pairs]
+    if base == "pods":
+        return named("Pod", pods(None, ctx))
+    if base in ("deployments", "statefulsets", "daemonsets"):
+        want = {"deployments": "Deployment", "statefulsets": "StatefulSet", "daemonsets": "DaemonSet"}[base]
+        return [w for w in workloads(ctx) if w["kind"] == want]
+    if base == "services":
+        return named("Service", services(None))
+    if base == "ingresses":
+        return meta("Ingress", [("api", "api"), ("web", "web"), ("monitoring", "grafana")])
+    if base == "configmaps":
+        return meta("ConfigMap", [("api", "api-config"), ("api", "kube-root-ca.crt"), ("web", "nginx-conf"),
+                                  ("monitoring", "grafana-dashboards"), ("search", "search-config")])
+    if base == "secrets":  # names only; the demo has no data to leak either
+        return meta("Secret", [("api", "api-token"), ("api", "orders-db-credentials"), ("web", "web-tls"),
+                               ("flux-system", "flux-system")])
+    if base == "jobs":
+        return jobs_and_crons(None)[0]
+    if base == "cronjobs":
+        return jobs_and_crons(None)[1]
+    if base == "persistentvolumeclaims":
+        return meta("PersistentVolumeClaim", [("api", "data-redis-0"), ("api", "orders-db"), ("monitoring", "prometheus-db-prometheus-0")], 300)
+    if base in ("kustomizations", "helmreleases"):
+        if ctx == "acme-staging":  # a cluster without Flux: the CRDs are missing
+            die('error: the server doesn\'t have a resource type "%s"' % base)
+        want = {"kustomizations": "Kustomization", "helmreleases": "HelmRelease"}[base]
+        return [o for o in flux_objects(ctx) if o["kind"] == want]
+    die('error: the server doesn\'t have a resource type "%s"' % base)
+
+
+def find_columns(res, ctx):
+    rows = []
+    for kind in res.split(","):
+        for o in find_objects(kind, ctx):
+            m = o["metadata"]
+            rows.append((o["kind"], m.get("namespace") or "<none>", m["name"], m.get("creationTimestamp") or ts(30 * 86400)))
+    for r in rows:
+        print("%-22s %-14s %-36s %s" % r)
+
+
 # ── main ─────────────────────────────────────────────────────────────────
 def main():
     flags, pos, rest = parse(sys.argv[1:])
@@ -767,6 +814,9 @@ def main():
             CERTS[0]["status"]["notAfter"] = ts(-6 * 86400)
             CERTS[1]["status"]["notAfter"] = ts(-70 * 86400)
             json.dump({"items": CERTS}, sys.stdout)
+            return
+        if out.startswith("custom-columns"):  # kfind: KIND NAMESPACE NAME CREATED of several kinds
+            find_columns(res, ctx)
             return
         if res in ("ns", "namespaces", "namespace"):
             print("\n".join(NAMESPACES))

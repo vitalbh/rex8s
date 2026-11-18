@@ -21,6 +21,9 @@ type section struct {
 	skip  bool // not applicable on this cluster (not shown)
 	lines []string
 	hint  string // command to dig in, e.g. "kfail"
+
+	expired bool // the query failed because the login expired
+	failing int  // Pods: how many are failing (for the tab status)
 }
 
 // kstatus: one screen with the cluster's health — nodes, pods, workloads,
@@ -54,14 +57,23 @@ func (a *app) kstatus(args []string) error {
 	if err != nil {
 		return err
 	}
+	var tab *tabStatus
 	if watch {
 		rex.Rename("status " + c.Short)
+		tab = newTabStatus()
+		defer tab.Clear()
 	}
 	for {
 		start := time.Now()
-		out := renderStatus(c, gatherStatus(cl, c.Name), start)
+		secs := gatherStatus(cl, c.Name)
+		out := renderStatus(c, secs, start)
 		if watch {
 			fmt.Print("\x1b[H\x1b[2J")
+			if state, kind, msg := statusLine(c, secs); state == "blocked" {
+				tab.Blocked(kind, msg)
+			} else {
+				tab.Set(state, msg)
+			}
 		}
 		fmt.Print(out)
 		if !watch {
@@ -120,7 +132,38 @@ func renderStatus(c kube.Context, secs []section, at time.Time) string {
 }
 
 func errSection(name string, err error) section {
-	return section{name: name, bad: true, lines: []string{tui.Dim.Render(truncate(lastLogLine(err.Error()), 120))}}
+	return section{name: name, bad: true, expired: kube.AuthExpired(err),
+		lines: []string{tui.Dim.Render(truncate(lastLogLine(err.Error()), 120))}}
+}
+
+// statusLine is kstatus -w's one line on the Rex tab: the login expired
+// (blocked: kauth), what needs attention (error), or healthy (idle).
+func statusLine(c kube.Context, secs []section) (state, kind, msg string) {
+	var bad []string
+	failing := 0
+	for _, s := range secs {
+		if s.skip {
+			continue
+		}
+		if s.expired {
+			return "blocked", "auth", c.Short + ": login expired · kauth " + c.Short
+		}
+		failing += s.failing
+		if s.bad && s.failing == 0 {
+			bad = append(bad, s.name)
+		}
+	}
+	var parts []string
+	if failing > 0 {
+		parts = append(parts, plural(failing, "failing pod"))
+	}
+	if len(bad) > 0 {
+		parts = append(parts, strings.Join(bad, ", "))
+	}
+	if len(parts) == 0 {
+		return "idle", "", c.Short + ": healthy"
+	}
+	return "error", "", c.Short + ": " + strings.Join(parts, " · ")
 }
 
 // ── nodes ──────────────────────────────────────────────────────────────
@@ -248,7 +291,7 @@ func statusPods(cl kube.Client, ctxName string) section {
 	s := section{name: "Pods"}
 	first := fmt.Sprintf("%d running", count["ok"])
 	if count["FAIL"] > 0 {
-		s.bad, s.hint = true, "kfail"
+		s.bad, s.hint, s.failing = true, "kfail", count["FAIL"]
 		first += " · " + tui.Err.Render(fmt.Sprintf("%d failing", count["FAIL"]))
 	}
 	if count["WAIT"] > 0 {

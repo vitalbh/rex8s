@@ -88,7 +88,18 @@ type Follower struct {
 	// Retry how long to wait after a failure (10s).
 	Poll, Retry time.Duration
 
+	// State, when set, hears how each stream is doing: the number of pods
+	// it follows, or why it follows none (problem). It may be called from
+	// several streams at once.
+	State func(s Spec, pods int, problem string)
+
 	mu sync.Mutex
+}
+
+func (f *Follower) state(s Spec, pods int, problem string) {
+	if f.State != nil {
+		f.State(s, pods, problem)
+	}
 }
 
 func (f *Follower) println(s string) {
@@ -184,8 +195,10 @@ func (f *Follower) followPod(ctx context.Context, s Spec, label Label) {
 	cmd, pipe, err := f.start(s, args)
 	if err != nil {
 		f.say(label, "(cannot start kubectl for pod "+name+": "+err.Error()+")")
+		f.state(s, 0, "cannot start kubectl")
 		return
 	}
+	f.state(s, 1, "")
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -200,6 +213,7 @@ func (f *Follower) followPod(ctx context.Context, s Spec, label Label) {
 	<-done
 	if ctx.Err() == nil {
 		f.say(label, "(logs of pod "+name+" ended)")
+		f.state(s, 0, "pod "+name+" ended")
 	}
 }
 
@@ -237,8 +251,10 @@ func (f *Follower) followWorkload(ctx context.Context, s Spec, label Label) {
 		if err != nil || len(pods) == 0 {
 			if err != nil {
 				tell("(" + f.why(s, err) + "; retrying)")
+				f.state(s, 0, f.why(s, err))
 			} else {
 				tell("(no running pods; retrying)")
+				f.state(s, 0, "no running pods")
 			}
 			sleep(ctx, f.retry())
 			continue
@@ -256,10 +272,12 @@ func (f *Follower) followWorkload(ctx context.Context, s Spec, label Label) {
 		cmd, pipe, err := f.start(s, args)
 		if err != nil {
 			tell("(cannot start kubectl: " + err.Error() + "; retrying)")
+			f.state(s, 0, "cannot start kubectl")
 			sleep(ctx, f.retry())
 			continue
 		}
 		said = ""
+		f.state(s, len(pods), "")
 		done := make(chan struct{})
 		go func() {
 			defer close(done)

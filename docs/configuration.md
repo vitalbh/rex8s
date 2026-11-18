@@ -81,7 +81,7 @@ Everything outside Rex is optional. How to turn each one on or off:
 | **Raycast extension** | Open Cluster, Search Pods/Services/Workloads/Flux, the menu bars | `cd raycast && npm install && npm run dev` (from a clone) | Raycast → Extensions → rex8s → Uninstall (or disable single commands there) |
 | **Raycast menu bar** | Flux Status, Failing Pods, Alerts, Kube Context | enable those commands in Raycast | disable them in Raycast settings |
 | **Cluster alerts** | `kstatus`, Alerts menu bar | automatic when an Alertmanager (port 9093) or Prometheus (9090) service runs in the cluster; read through the API server proxy | nothing to turn off: no such service, no Alerts line |
-| **Production guard** | `kubectl`/`helm`/`flux` in panes (and any shell with the PATH), and the rex8s commands that change a cluster | default: asks at a terminal; without one (agents, scripts) refuses; logs each decision in `~/.cache/rex8s/audit.log` | `REX8S_FORCE=1` per command |
+| **Production guard** | `kubectl`/`helm`/`flux` in panes (and any shell with the PATH), and the rex8s commands that change a cluster | default: asks at a terminal; without one (agents, scripts) refuses; logs each decision in `~/.cache/rex8s/audit.log` | `kunlock` for a while (also lets agents through; only a person can unlock), `REX8S_FORCE=1` per command |
 
 `kwhy` and `kask` send the pod's describe output (env values redacted), events
 and logs to the model behind your `claude` (or `codex`) CLI. Logs can still

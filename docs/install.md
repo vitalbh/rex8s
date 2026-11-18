@@ -78,8 +78,18 @@ In a Rex session on the server, the browser still opens on the Mac:
   on the server; when you click one, Rex forwards that port to the Mac by
   itself.
 - **Non-HTTP forwards** (`psql`, `redis-cli` on the Mac) have no link to
-  click: bring the port over with Rex, e.g. for a `kpf` on port 54321,
-  `rex -S SERVER forward new -L 54321:127.0.0.1:54321` on the Mac.
+  click: bring the port over with Rex. `kpf` (and `kpf NAME` for a database
+  favorite) prints the command when it runs in a Rex session on a server,
+  e.g. for port 54321, run on the Mac
+  `rex -S SERVER forward new -L 54321:127.0.0.1:54321` (it forwards until
+  ctrl+c), or use **Forward Port…** in Rex's palette.
+
+  rex8s can't set this forward up by itself: a Rex forward listens on the
+  machine of the client that carries it, so `rex forward new -L` run on the
+  server would listen on the server, not on the Mac; the forward's tunnel
+  block belongs to the client that made it; and the app's Forward Port… is a
+  dialog that takes no arguments. Only something running on the Mac can make
+  the Mac listen.
 - **What opens or copies on the machine itself** doesn't work there: `kpf -l`'s
   open/copy, `kgit` opening a file or GitHub, `kauth` opening the login page
   (it prints the URL), macOS notifications and the Raycast extension.

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/vitalbh/rex8s/internal/config"
@@ -87,12 +88,26 @@ func (a *app) fwd(name string) error {
 		if cl := kind.Client(e.Local); cl != "" {
 			fmt.Println("  " + cl)
 		}
+		if h := remoteForwardHint(e.Local); h != "" {
+			fmt.Println("  " + tui.Dim.Render(h))
+		}
+		holdForReading()
 		return nil
 	}
 	if !desktop.CanOpen() {
+		holdForReading()
 		return nil // the URL is printed above
 	}
 	return desktop.OpenURL(url)
+}
+
+// holdForReading keeps a pane that closes when rex8s returns — the palette's
+// floating kpf pickers set REX8S_HOLD=1 — open until enter, when what was
+// just printed is the point (a database URL, a copied URL).
+func holdForReading() {
+	if os.Getenv("REX8S_HOLD") != "" {
+		waitClose("")
+	}
 }
 
 // kpfFavorites: picker of the favorites (running ones marked).

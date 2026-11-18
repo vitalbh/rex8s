@@ -141,6 +141,9 @@ Read-only commands (safe to run, plain text output; no colors when piped)
 - What changed: ` + "`rex8s kwhat [DURATION] [FILTER]`" + ` — rollouts with image changes, Flux applies,
   Helm upgrades, new commits; every cluster. Start here when something broke.
 - Versions: ` + "`rex8s kver [-d] [FILTER]`" + ` — image tag per workload per cluster (-d: only differences).
+- Where is it: ` + "`rex8s kfind [-x] NAME | cat`" + ` — objects by name on every cluster (pods, workloads,
+  services, ingresses, config maps, secret names, jobs, PVCs, Flux): one tab-separated
+  line each (cluster, kind, ns/name, age) when piped.
 - Disk: ` + "`rex8s kdisk [-A] [-a]`" + ` — PVC and node disk usage. Resources: ` + "`rex8s kreq [-n]`" + ` —
   OOM risk, over-provisioning, missing requests (needs metrics-server).
 - CronJobs: ` + "`rex8s kcron [DURATION] [FILTER]`" + ` — upcoming runs and last results.
@@ -165,7 +168,9 @@ Changing a cluster
   one the guard doesn't recognize) is refused with a message; so are rex8s
   commands that change a cluster (kroll --target, krun…). Only after the user
   explicitly agrees to that exact change, run it again prefixed with
-  REX8S_FORCE=1. Every decision is logged in ~/.cache/rex8s/audit.log.
+  REX8S_FORCE=1. If the user unlocked the cluster with kunlock (a time
+  window they open themselves), changes go through without the refusal; never
+  run kunlock yourself. Every decision is logged in ~/.cache/rex8s/audit.log.
 - Logs and describe output may contain secrets or personal data: don't repeat
   tokens, passwords or keys.
 

@@ -35,12 +35,12 @@ a script runs them.
 | **ask why** | `kwhy` Claude explains an unhealthy pod · `kask` a Claude conversation about the cluster or a pod · `kincident` a session laid out for an incident |
 | **reach a service** | `kpf` port-forward that connects only while in use, with the right client command for databases · `kexec` / `knode` / `knet` shells in a pod, a node, a toolbox pod |
 | **ship with Flux** | `fdiff` what your branch would change · `fwatch` follow a push until it rolled out · `kgit` the file that defines a workload · `kflux` reconcile, suspend |
-| **work across clusters** | `kmulti` clusters side by side, `kall` types in all · `kwhat` what changed · `kver` which version runs where · `kdiff` · `krun` · `kroll` · `kcron` · `kjunk` |
+| **work across clusters** | `kfind` an object by name on every cluster · `kmulti` clusters side by side, `kall` types in all · `kwhat` what changed · `kver` which version runs where · `kdiff` · `krun` · `kroll` · `kcron` · `kjunk` |
 | **keep an eye on things** | Raycast menu bars: Flux status, failing pods, alerts, default context |
 
 Every command, with its options: **[docs/commands.md](docs/commands.md)**.
 
-**⇧⌘J** picks a cluster for an isolated shell, **⇧⌘M** puts several side by side and `kall` types in all of them; **⇧⌘V** opens `kview` (above) on every cluster
+**⇧⌘J** picks a cluster for an isolated shell, **⇧⌘M** puts several side by side and `kall` types in all of them; **⇧⌘V** opens `kview` (above) on every cluster, and **⇧⌘I** jumps between a cluster shell and its `kview`
 
 ![rex8s in Rex: Cmd+Shift+J picks a cluster, kfail, Cmd+Shift+M opens clusters side by side, kall runs the same command in all of them](docs/tour.gif)
 

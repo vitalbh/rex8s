@@ -409,7 +409,10 @@ func (a *app) wlogtail(raw []string, lo logOpts) error {
 	}
 	fmt.Println(tui.Dim.Render("following " + strings.Join(labels, " · ") + lo.Describe() + " · new pods join after a rollout · ctrl+c to stop"))
 
-	f := &logstream.Follower{Client: cl, Clusters: clusters, Links: a.logLinks, Grep: re, Since: lo.Since}
+	tab := newTabStatus()
+	defer tab.Clear()
+	f := &logstream.Follower{Client: cl, Clusters: clusters, Links: a.logLinks, Grep: re, Since: lo.Since,
+		State: newLogStatus(tab, lo.Grep).update}
 	var wg sync.WaitGroup
 	for i, s := range specs {
 		label := logstream.StreamLabel(s.Label, logstream.StreamColors[i%len(logstream.StreamColors)], len(specs) > 1)

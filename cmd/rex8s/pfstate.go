@@ -26,6 +26,7 @@ func (a *app) kpfList() error {
 	es := a.pfList()
 	if len(es) == 0 {
 		fmt.Println(tui.Dim.Render("no port-forwards running · kpf to start one"))
+		holdForReading()
 		return nil
 	}
 	byKey := map[string]forward.Entry{}
@@ -62,13 +63,18 @@ func (a *app) kpfList() error {
 	}
 	switch act.Key {
 	case "open":
-		return desktop.OpenURL(e.URL())
+		if err := desktop.OpenURL(e.URL()); err != nil || desktop.CanOpen() {
+			return err
+		}
+		holdForReading() // printed instead
 	case "copy":
 		if err := desktop.Copy(e.URL()); err != nil {
 			return err
 		}
 		if desktop.CanOpen() {
 			fmt.Println("copied " + e.URL())
+		} else {
+			holdForReading()
 		}
 	case "save":
 		name, _ := tui.AskLine(tui.Bold.Render("Favorite name") + tui.Dim.Render(" (enter: "+e.Service+")") + "\n  > ")
@@ -77,6 +83,7 @@ func (a *app) kpfList() error {
 			return err
 		}
 		fmt.Printf("saved %s · %s\n", tui.Bold.Render(saved), tui.Dim.Render("kpf "+saved+" starts it and opens the browser"))
+		holdForReading()
 	case "stop":
 		if err := a.registry().Stop(e.PID); err != nil {
 			return err

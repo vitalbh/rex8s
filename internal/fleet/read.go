@@ -139,10 +139,14 @@ func readOne[T any](r *Reader, c kube.Context, queries [][]string, parse Parse[T
 	}
 	outs := make([][]byte, 0, len(queries))
 	for _, q := range queries {
+		q, optional := isOptional(q)
 		out, err := r.Client.Get(c.Name, q...)
 		switch {
 		case err == nil:
 			outs = append(outs, out)
+			continue
+		case optional: // a missing CRD, a forbidden kind: no rows, the cluster still counts
+			outs = append(outs, nil)
 			continue
 		case errors.Is(err, kube.ErrTimeout):
 			return nil, r.fail(c, err.Error())
@@ -161,6 +165,22 @@ func readOne[T any](r *Reader, c kube.Context, queries [][]string, parse Parse[T
 		rows[i] = kube.On[T]{C: c, V: v}
 	}
 	return rows, nil
+}
+
+// optionalMark leads a query that may fail (see Optional).
+const optionalMark = "\x00optional"
+
+// Optional marks a query (kubectl arguments) best effort: when it fails —
+// a CRD the cluster doesn't have, a kind the user may not list — the
+// parse function gets nil for its output instead of the cluster being
+// skipped. A timeout of an optional query doesn't back the cluster off.
+func Optional(q ...string) []string { return append([]string{optionalMark}, q...) }
+
+func isOptional(q []string) ([]string, bool) {
+	if len(q) > 0 && q[0] == optionalMark {
+		return q[1:], true
+	}
+	return q, false
 }
 
 // Key identifies a cluster for the backoff: its server (aliases share it).

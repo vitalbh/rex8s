@@ -22,7 +22,13 @@ background.
 | `⇧⌘K` | same → new tab with `kview` · shell · warnings (`cluster_browser: k9s` for k9s) |
 | `⇧⌘M` | pick several clusters → a tab with one pane each, side by side |
 | `⇧⌘V` | new tab with `kview -A`: every cluster, no picker |
-| `⇧⌘P` (palette) | **Kubernetes: Flux Monitor**, **Clusters Side by Side…**, **All Clusters (kview)**, **Restore Cluster Tabs** |
+| `⇧⌘I` | in a cluster shell: jump to the `kview` of the same cluster in this tab (the ⇧⌘K layout's counts), or open one in a split; in a `kview`: back to a shell of its cluster |
+| `⇧⌘P` (palette) | **Kubernetes: Flux Monitor**, **Clusters Side by Side…**, **All Clusters (kview)**, **Restore Cluster Tabs**, **Favorite Port-forwards…** (`kpf -f`), **Running Port-forwards** (`kpf -l`), **Open This Pane's Cluster in kview**, **Type in Every Cluster Pane (kall)…**, **Toggle Cluster Shell / kview** (⇧⌘I) |
+
+The port-forward and `kall` actions open a floating pane in the tab; it closes
+when you're done, and stays until enter when there is something to read (a
+database's URL and client command, an error). A pane is a cluster shell or a
+`kview` by its label (`PROD use/api`, `kview PROD use/api`), which rex8s sets.
 
 Key bindings are at the bottom of `rex/rex8s.lua`.
 
@@ -47,8 +53,9 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   they are refused until re-run with `REX8S_FORCE=1`. Production is detected
   by server URL, so every alias of the same cluster is covered, including
   `--cluster`, `--server`, `--user` and `HELM_KUBECONTEXT`. Each decision
-  (confirmed, cancelled, refused, forced) is logged in
-  `~/.cache/rex8s/audit.log`.
+  (confirmed, cancelled, refused, forced, unlocked) is logged in
+  `~/.cache/rex8s/audit.log`. During an incident, `kunlock` stops the
+  questions for a while.
 - **Expired logins** show up as "login expired" everywhere; picking such a
   cluster takes you straight to `kauth`.
 - **Tabs come back** after the Rex server restarts: the picker offers to
@@ -61,6 +68,7 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
 | `ktint [#hex\|off] [--save]` | production background: presets previewed live on the pane (enter saves), or try a color here |
 | `khelp [filter]` | every command in a picker, with usage; enter runs it |
 | `rex8s use-context CTX` | the machine's default context (what `kubectl` uses outside rex8s panes) |
+| `kunlock [cluster…\|all] [15m]` | production changes go through without typing the name, for a while (default: this pane's cluster, 15m; at most 12h) — like sudo's grace period. Agents get through too (no `REX8S_FORCE` on every command), but only you can unlock: `kunlock` itself refuses agents and scripts. `kunlock off` locks again, `kunlock -l` lists |
 | `REX8S_FORCE=1 kubectl …` | skip the production confirmation (scripts) |
 
 ## Browse
@@ -105,7 +113,8 @@ and production: `kview PROD use/payments`, `kview PROD all`.
   CPU/memory), pods, unavailable workloads, Flux, failed jobs, firing alerts
   (from an Alertmanager or Prometheus inside the cluster), expiring
   certificates (cert-manager) and the last hour's warnings. `-w` refreshes
-  every 30s.
+  every 30s and keeps a line on the Rex tab: `use: 3 failing pods · Flux`,
+  `use: healthy`, or `login expired`.
 - **`kfail [-n|-A] [filter]`** — only the unhealthy pods (all namespaces; `-n`
   this one; `-A` every cluster), with their recent events and last log lines
   in the preview — the crashed container's logs when it restarted. Logs are
@@ -115,7 +124,8 @@ and production: `kview PROD use/payments`, `kview PROD all`.
   ones that need attention first; same preview and actions as `kfail`.
   `kpods failing` is `kfail -A`.
 - **`kwarn [-n]`** — only Warning events (OOMKilled, BackOff, probes, image
-  pulls), deduplicated. Also the bottom pane of the ⇧⌘K layout.
+  pulls), deduplicated. Also the bottom pane of the ⇧⌘K layout. The Rex tab
+  says how many came in the last 10 minutes.
   **`kwarn -A [cluster…]`**: every cluster's (or the ones named) in one
   stream, each line led by its cluster.
 - **`kjobs [-n|-A] [failed|running|done|suspended|cron] [filter]`** — Jobs and
@@ -136,7 +146,9 @@ and production: `kview PROD use/payments`, `kview PROD all`.
   stream, and the new ones join after a rollout — then single pods. `-A` lists
   the workloads and pods of every cluster: mark any mix and they follow in one
   stream, each line led by its cluster and pod. `-g` keeps only matching lines
-  (highlighted); `-s 1h` starts an hour back.
+  (highlighted); `-s 1h` starts an hour back. The Rex tab of the split says
+  `following 4 pods`, or why a stream follows none (`login expired`, `no
+  running pods`).
 - **`kgrep [-A] [pattern]`** — `klogs` that searches: pick a workload or pod,
   then type what to look for; it keeps following, so new matches keep coming.
   `kgrep timeout` skips the question.
@@ -229,7 +241,19 @@ and production: `kview PROD use/payments`, `kview PROD all`.
   and tint. Pick the clusters, or name a group from the config (`kmulti prod`).
   `kmulti -n api get pods` has every pane run the command first and stay a
   shell. In that tab, **`kall CMD`** types `CMD` in every cluster pane at once
-  (production panes still ask before a change).
+  (production panes still ask before a change); `kall` alone, or the palette's
+  **Type in Every Cluster Pane (kall)…**, asks for the command.
+- **`kfind [-x] NAME`** — where is it? Looks for an object by name on every
+  cluster: pods, Deployments, StatefulSets, DaemonSets, services, ingresses,
+  ConfigMaps, Secrets (only their names: the data is never read into the
+  output), Jobs, CronJobs, PVCs, and Flux Kustomizations and HelmReleases
+  where Flux is installed. A substring of the name by default, `-x` the exact
+  name, `NS/NAME` matches the namespace too. Each cluster says how many it has
+  as it answers (or why it was skipped); then a picker with cluster, kind,
+  namespace/name and age. Enter: a pod gets `kfail`'s actions, a workload its
+  logs, a service a port-forward; any of them `describe` or a shell on its
+  cluster and namespace, in a split. Piped (`kfind api | grep use`), it prints
+  the list, one tab-separated line each.
 - **`kwhat [duration] [filter]`** — what changed? A timeline of every cluster,
   newest first: rollouts with the image change (or "rollout restart"), what
   Flux applied, Helm upgrades and failures, new commits fetched. Default the

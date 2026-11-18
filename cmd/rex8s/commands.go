@@ -206,6 +206,9 @@ func commandTable() []command {
 		{name: "ktint", wrapper: "ktint", args: "[#hex|off] [--save]", short: "background color of production panes",
 			group: "pane", details: []string{"No argument: presets, previewed live; enter saves to config.yaml.", "ktint #1f1430 tries a color in this pane; --save keeps it; ktint reset undoes."},
 			run: func(a *app, args []string) error { return a.ktint(args) }},
+		{name: "kunlock", wrapper: "kunlock", args: "[CLUSTER...|all] [DUR] · off · -l", short: "production changes go through without asking for a while (15m)",
+			group: "pane", details: []string{"Like sudo's grace period, for an incident: default this pane's cluster for 15m.", "Agents get through too, but only you can unlock; kunlock off locks again; all logged."},
+			run: func(a *app, args []string) error { return a.kunlock(args) }},
 		{name: "khelp", wrapper: "khelp", args: "[FILTER]", short: "every command in a picker; enter runs it",
 			run: func(a *app, args []string) error { return a.khelp(args) }},
 		{name: "use-context", args: "CTX", short: "set the machine's default context (~/.kube/config)",
@@ -300,10 +303,13 @@ func commandTable() []command {
 		{name: "kwhat", wrapper: "kwhat", args: "[DURATION] [FILTER]", short: "what changed on every cluster (default the last hour)",
 			group: "clusters", details: []string{"Rollouts with the image change, what Flux applied, Helm upgrades, new commits.", "e.g. kwhat 6h api. Flux's part comes from events, kept about an hour."},
 			run: func(a *app, args []string) error { return a.kwhat(args) }},
+		{name: "kfind", wrapper: "kfind", args: "[-x] NAME", short: "find an object by name on every cluster",
+			group: "clusters", details: []string{"Pods, workloads, services, ingresses, config maps, secrets (names only), jobs,", "cronjobs, PVCs, Flux Kustomizations and HelmReleases. A substring of the name; -x exact; NS/NAME works.", "Enter: a pod's actions, a workload's logs, a service's port-forward, describe, a shell there."},
+			run: func(a *app, args []string) error { return a.kfind(args) }},
 		{name: "kmulti", wrapper: "kmulti", args: "[GROUP] [-n NS|-A] [CMD...]", short: "a tab with one pane per cluster, side by side",
 			group: "clusters", details: []string{"Pick clusters (space), or a group from the config (groups: {prod: [dal, sp]}).", "With CMD each pane runs it first (kmulti get pods -n api). Palette: Clusters Side by Side…"},
 			run: func(a *app, args []string) error { return a.kmulti(args) }},
-		{name: "kall", wrapper: "kall", args: "CMD...", short: "type CMD in every cluster pane of this tab",
+		{name: "kall", wrapper: "kall", args: "[CMD...]", short: "type CMD in every cluster pane of this tab",
 			group: "clusters", details: []string{"In a kmulti tab: kall get pods -n api runs on every cluster at once.", "Production panes still ask before a change."},
 			run: func(a *app, args []string) error { return a.kall(args) }},
 		{name: "kjunk", wrapper: "kjunk", args: "[debug|pods|jobs|pv] [FILTER]", short: "leftovers on every cluster: mark and delete",
@@ -429,6 +435,13 @@ func commandTable() []command {
 					return err
 				}
 				return a.askpod(args[0], args[1], args[2])
+			}},
+		{name: "_describe", args: "CTX NS RESOURCE NAME", short: "kubectl describe of an object, in this pane (kfind)", hidden: true, pane: true,
+			run: func(a *app, args []string) error {
+				if err := need("_describe", args, 4); err != nil {
+					return err
+				}
+				return a.describeTail(args[0], args[1], args[2], args[3])
 			}},
 		{name: "_pf", aliases: []string{"pfbg"}, args: "CTX NS SVC LOCAL:REMOTE KIND", short: "hold a port-forward in the background (started by kpf)", hidden: true,
 			run: func(a *app, args []string) error { return a.pfbg(args) }},

@@ -19,10 +19,12 @@ import (
 // and for rex8s commands that change a cluster themselves (ConfirmChange):
 //
 //  1. REX8S_FORCE set: go ahead (logged as "forced").
-//  2. Nobody at a terminal to confirm: an agent (Claude Code sets CLAUDECODE,
+//  2. The clusters were unlocked with kunlock (unlock.go): go ahead, for
+//     agents too, logged as "unlocked". Only a person can unlock.
+//  3. Nobody at a terminal to confirm: an agent (Claude Code sets CLAUDECODE,
 //     kask sets REX8S_AGENT; Codex, Cursor and scripts have no TTY). Refused
 //     with a message saying how to proceed.
-//  3. Otherwise the user types the production cluster name(s).
+//  4. Otherwise the user types the production cluster name(s).
 //
 // Every decision is written to the audit log (see audit.go).
 
@@ -64,6 +66,10 @@ func decide(prod []string, what string, maybe bool, notes ...string) error {
 		audit(who, "forced", what)
 		return nil
 	}
+	if unlocked(prod) {
+		audit(who, "unlocked", what)
+		return nil
+	}
 	if unattended() {
 		audit(who, "refused", what)
 		verb := "would change"
@@ -75,7 +81,8 @@ func decide(prod []string, what string, maybe bool, notes ...string) error {
 			cluster = "clusters"
 		}
 		return fmt.Errorf("%w: %s %s the PRODUCTION %s %s, and there is no terminal to confirm it.\n"+
-			"An agent: ask the user first; only if they agree to this exact change, run it again prefixed with REX8S_FORCE=1.\n"+
+			"An agent: ask the user first; only if they agree to this exact change, run it again prefixed with REX8S_FORCE=1\n"+
+			"(or the user can run kunlock in their terminal to let changes to this cluster through for a while).\n"+
 			"A script: prefix it with REX8S_FORCE=1.",
 			ErrRefused, what, verb, cluster, strings.Join(prod, ", "))
 	}

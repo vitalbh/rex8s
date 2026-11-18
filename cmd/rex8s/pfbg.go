@@ -85,6 +85,9 @@ func (a *app) printForward(e forward.Entry, kind forward.Kind) {
 	if cl := kind.Client(e.Local); cl != "" {
 		fmt.Println("  " + cl)
 	}
+	if h := remoteForwardHint(e.Local); h != "" && !kind.Web() {
+		fmt.Println("  " + tui.Dim.Render(h))
+	}
 	if cv := kind.Caveat(); cv != "" {
 		fmt.Println("  " + tui.Dim.Render("note: "+cv))
 	}
