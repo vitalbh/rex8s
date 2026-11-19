@@ -11,6 +11,7 @@ import (
 
 	"github.com/vitalbh/rex8s/internal/fleet"
 	"github.com/vitalbh/rex8s/internal/forward"
+	"github.com/vitalbh/rex8s/internal/guard"
 	"github.com/vitalbh/rex8s/internal/kube"
 )
 
@@ -26,7 +27,8 @@ import (
 //	                               --notify: macOS notification for new ones
 //	rex8s list pf                  running port-forwards
 //	rex8s list alerts [--notify]   firing alerts of every cluster; --notify: new critical ones
-//	rex8s list workloads           Deployments/StatefulSets/DaemonSets of every cluster
+//	rex8s list workloads [CTX]     Deployments/StatefulSets/DaemonSets of every cluster (or one)
+//	rex8s list unlocks             production clusters unlocked by kunlock, until when
 //	rex8s list fwd                 favorite port-forwards (config forwards)
 //
 // Errors are JSON too: {"error": "...", "loginExpired": true}.
@@ -105,7 +107,9 @@ func (a *app) listData(args []string) (any, error) {
 		}
 		return out, err
 	case "workloads":
-		return a.workloadsJSON()
+		return a.workloadsJSON(arg(args, 1))
+	case "unlocks":
+		return unlocksJSON(), nil
 	case "fwd":
 		return a.favoritesJSON(), nil
 	case "clusters":
@@ -146,9 +150,11 @@ func (a *app) clustersJSON() ([]clusterJSON, error) {
 
 // listCluster: the lists of one cluster (every namespace when ns is "").
 func (a *app) listCluster(kind, ctxName, ns string) (any, error) {
-	if _, err := a.context(ctxName); err != nil {
+	c, err := a.context(ctxName)
+	if err != nil {
 		return nil, err
 	}
+	ctxName = c.Name // a short name (euw) works too: the Rex palette has those
 	cl, err := a.client(a.src)
 	if err != nil {
 		return nil, err
@@ -394,7 +400,7 @@ type workloadJSON struct {
 	Target    string `json:"target"` // for kroll --target: ctx|kind|ns|name
 }
 
-func (a *app) workloadsJSON() ([]workloadJSON, error) {
+func (a *app) workloadsJSON(only string) ([]workloadJSON, error) {
 	cl, err := a.client(a.src)
 	if err != nil {
 		return nil, err
@@ -404,7 +410,15 @@ func (a *app) workloadsJSON() ([]workloadJSON, error) {
 	if err != nil {
 		return nil, err
 	}
-	ws, _ := a.findWorkloads(cl, fleet.All(raw, a.cfg), "")
+	clusters := fleet.All(raw, a.cfg)
+	if only != "" {
+		c, err := a.context(only)
+		if err != nil {
+			return nil, err
+		}
+		clusters = []kube.Context{c}
+	}
+	ws, _ := a.findWorkloads(cl, clusters, "")
 	out := make([]workloadJSON, 0, len(ws))
 	for _, t := range ws {
 		img := mainImage(t)
@@ -415,3 +429,7 @@ func (a *app) workloadsJSON() ([]workloadJSON, error) {
 	}
 	return out, nil
 }
+
+// unlocksJSON: the clusters kunlock let through (short name, "*" every
+// one) and until when.
+func unlocksJSON() map[string]time.Time { return guard.Unlocks() }

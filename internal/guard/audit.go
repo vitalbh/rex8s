@@ -14,7 +14,8 @@ import (
 //	2026-11-17T10:04:05-03:00	confirmed	use	kubectl delete pod web-1
 //	2026-11-17T10:05:12-03:00	refused	use,euw	kroll: rollout restart 2 workload(s) (agent)
 //
-// Tab-separated: time, outcome (confirmed, cancelled, refused, forced), the
+// Tab-separated: time, outcome (confirmed, cancelled, refused, forced,
+// unlocked, approved and denied in the Rex palette), the
 // production clusters, the command. Past auditMax bytes the file moves to
 // audit.log.1 (replacing the previous one), so it never holds more than
 // about twice that. Writing is best effort: a failure never blocks a command.

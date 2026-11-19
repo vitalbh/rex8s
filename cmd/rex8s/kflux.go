@@ -76,8 +76,36 @@ func (a *app) kflux() error {
 	if err != nil || act == nil {
 		return err
 	}
+	return a.fluxAct(cl, c, f, act.Key)
+}
 
-	switch act.Key {
+// fluxOne: rex8s _flux CTX KIND NS NAME ACTION, the Rex palette's kflux.
+func (a *app) fluxOne(ctxName, kind, ns, name, action string) error {
+	c, err := a.context(ctxName)
+	if err != nil {
+		return err
+	}
+	cl, err := a.client(a.src)
+	if err != nil {
+		return err
+	}
+	items, _, err := cl.FluxItems(c.Name)
+	if err != nil {
+		return err
+	}
+	for _, f := range items {
+		if f.Kind == kind && f.Namespace == ns && f.Name == name {
+			fmt.Println(fluxHead(f))
+			return a.fluxAct(cl, c, f, action)
+		}
+	}
+	return fmt.Errorf("no %s %s/%s on %s", kind, ns, name, c.Short)
+}
+
+// fluxAct runs one kflux action on f: reconcile, events, describe, suspend
+// or resume.
+func (a *app) fluxAct(cl kube.Client, c kube.Context, f kube.FluxItem, action string) error {
+	switch action {
 	case "reconcile":
 		if ok, err := a.confirmChange([]kube.Context{c}, fmt.Sprintf("kflux: reconcile %s %s/%s", f.Kind, f.Namespace, f.Name)); !ok {
 			return err
@@ -89,11 +117,11 @@ func (a *app) kflux() error {
 	case "describe":
 		return a.runKubectl(false, "--context", c.Name, "-n", f.Namespace, "describe", f.Resource(), f.Name)
 	case "suspend", "resume":
-		patch := fmt.Sprintf(`{"spec":{"suspend":%v}}`, act.Key == "suspend")
+		patch := fmt.Sprintf(`{"spec":{"suspend":%v}}`, action == "suspend")
 		// through the guard: suspending in production asks for confirmation
 		return a.runKubectl(true, "--context", c.Name, "-n", f.Namespace, "patch", f.Resource(), f.Name, "--type", "merge", "-p", patch)
 	}
-	return nil
+	return fmt.Errorf("unknown flux action %q", action)
 }
 
 func fluxBadge(f kube.FluxItem) string {

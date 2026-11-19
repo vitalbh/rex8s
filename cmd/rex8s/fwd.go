@@ -10,6 +10,7 @@ import (
 	"github.com/vitalbh/rex8s/internal/desktop"
 	"github.com/vitalbh/rex8s/internal/forward"
 	"github.com/vitalbh/rex8s/internal/kube"
+	"github.com/vitalbh/rex8s/internal/rex"
 	"github.com/vitalbh/rex8s/internal/tui"
 	"github.com/vitalbh/rex8s/internal/yamledit"
 )
@@ -61,7 +62,26 @@ func favURL(local int, path string) string {
 
 // fwd NAME (kpf NAME, kpf -f, rex8s _fwd from Raycast): start the favorite's background forward
 // unless it runs, then open its URL in the browser.
-func (a *app) fwd(name string) error {
+func (a *app) fwd(name string) error { return a.fwdTo(name, false) }
+
+// openOrCopy opens url in the browser, or copies it (copy, or no browser
+// here) and says so in a notification: for the Rex palette, which has no
+// pane to print in.
+func openOrCopy(url string, copy bool) error {
+	if !copy && desktop.CanOpen() {
+		return desktop.OpenURL(url)
+	}
+	if err := desktop.Copy(url); err != nil {
+		return err
+	}
+	rex.Notify("rex8s", "copied "+url)
+	fmt.Println("copied " + url)
+	return nil
+}
+
+// fwdTo is fwd; quiet (rex8s _fwd --copy, the Rex palette): nothing to
+// read, so a database's URL is copied instead of printed.
+func (a *app) fwdTo(name string, quiet bool) error {
 	f, ok := a.favorite(name)
 	if !ok {
 		return fmt.Errorf("no favorite forward %q in %s", name, a.cfg.File())
@@ -83,6 +103,9 @@ func (a *app) fwd(name string) error {
 		fmt.Println("already running → " + tui.Ok.Render(url))
 	} else {
 		fmt.Println(tui.Bold.Render(f.Name) + " → " + tui.Ok.Render(url) + tui.Dim.Render("  (kubectl connects on first use)"))
+	}
+	if quiet {
+		return openOrCopy(url, !kind.Web())
 	}
 	if !kind.Web() { // a database: nothing to open; the client command helps
 		if cl := kind.Client(e.Local); cl != "" {

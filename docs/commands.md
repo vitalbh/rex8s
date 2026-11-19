@@ -23,12 +23,25 @@ background.
 | `⇧⌘M` | pick several clusters → a tab with one pane each, side by side |
 | `⇧⌘V` | new tab with `kview -A`: every cluster, no picker |
 | `⇧⌘I` | in a cluster shell: jump to the `kview` of the same cluster in this tab (the ⇧⌘K layout's counts), or open one in a split; in a `kview`: back to a shell of its cluster |
-| `⇧⌘P` (palette) | **Kubernetes: Flux Monitor**, **Clusters Side by Side…**, **All Clusters (kview)**, **Restore Cluster Tabs**, **Favorite Port-forwards…** (`kpf -f`), **Running Port-forwards** (`kpf -l`), **Open This Pane's Cluster in kview**, **Type in Every Cluster Pane (kall)…**, **Toggle Cluster Shell / kview** (⇧⌘I) |
+| `⇧⌘P` (palette) | **Kubernetes: Flux Monitor**, **Clusters Side by Side…**, **All Clusters (kview)**, **Restore Cluster Tabs**, **Favorite Port-forwards…** (`kpf -f`), **Running Port-forwards** (`kpf -l`), **Open This Pane's Cluster in kview**, **Type in Every Cluster Pane (kall)…**, **Toggle Cluster Shell / kview** (⇧⌘I), **Unlock Production for a While…** / **Lock Production Again…** (`kunlock`), **Restart Workloads…** (`kroll`), **Workload Logs…** (`klogs`/`kgrep`), **Flux Resources…** (`kflux`), **Incident Session…** (`kincident`), **Find an Object by Name…** (`kfind`) |
 
-The port-forward and `kall` actions open a floating pane in the tab; it closes
-when you're done, and stays until enter when there is something to read (a
-database's URL and client command, an error). A pane is a cluster shell or a
+The palette actions ask their questions in the palette itself — pick a
+cluster, tick workloads, type a filter — in every connected Rex app, the
+iPhone's too (Rex preview.21 or newer: API revision 17; `rex8s doctor`
+checks it). A favorite web UI opens in the browser, a database's URL is
+copied (a notification says so). On an older Rex the port-forward, ⇧⌘M and
+`kall` actions open the rex8s picker in a floating pane instead (it closes
+when you're done, and stays until enter when there is something to read), and
+the newer flows say which command to type. A pane is a cluster shell or a
 `kview` by its label (`PROD use/api`, `kview PROD use/api`), which rex8s sets.
+
+| **Cluster Health…** → a cluster → Pods → Logs | **Flux Resources…** → reconcile (production asks in the pane) |
+|---|---|
+| ![Cluster Health in the palette](palette-health.gif) | ![Flux Resources in the palette](palette-flux.gif) |
+
+**Favorite Port-forwards…**: a web UI opens in the browser, a database's URL is copied
+
+![favorite port-forwards in the palette](palette-fwd.gif)
 
 Key bindings are at the bottom of `rex/rex8s.lua`.
 
@@ -49,11 +62,15 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   rex8s commands that change a cluster (`kexec`, `knode`, `knet`, `krun`,
   `kroll`, `kjunk`, kflux's reconcile), ask you to type the cluster name first.
   A command the guard doesn't know (a kubectl plugin, a typo, an unknown flag
-  before the verb) asks too. With no terminal to ask (an agent, a script)
-  they are refused until re-run with `REX8S_FORCE=1`. Production is detected
+  before the verb) asks too. With no terminal to ask (an agent, a script),
+  the Rex palette asks instead — "Claude Code wants to change PRODUCTION
+  use", with the command, on the Mac and the iPhone: **Allow once** lets that
+  one command through, **Deny** refuses it and tells the agent not to retry.
+  Unanswered in 90s, without Rex, or with `guard_palette: false`, it is
+  refused until re-run with `REX8S_FORCE=1`. Production is detected
   by server URL, so every alias of the same cluster is covered, including
   `--cluster`, `--server`, `--user` and `HELM_KUBECONTEXT`. Each decision
-  (confirmed, cancelled, refused, forced, unlocked) is logged in
+  (confirmed, cancelled, refused, forced, unlocked, approved, denied) is logged in
   `~/.cache/rex8s/audit.log`. During an incident, `kunlock` stops the
   questions for a while. `guard: false` in the config turns it off entirely
   (`rex8s setup` then removes the `kubectl`/`helm`/`flux` links; nothing asks
@@ -61,7 +78,8 @@ Key bindings are at the bottom of `rex/rex8s.lua`.
   terminal.
 
   The guard is a client-side safety net against slips, not a security
-  boundary: it only sees commands that go through it. A `kubectl` run by its
+  boundary: it only sees commands that go through it (and any Rex app
+  connected to your server can answer the palette). A `kubectl` run by its
   full path (`/opt/homebrew/bin/kubectl`), k9s, Lens, or any program built on
   client-go changes production without asking. For a real barrier, use RBAC
   on the server — a read-only context for daily work and a separate one with
@@ -373,7 +391,7 @@ bindings, the palette and Raycast run:
 | `rex8s label` · `rex8s restore` | refresh this pane's label · reopen the cluster tabs lost when the Rex server restarted |
 | `rex8s monitor` | the Flux monitor (palette) |
 | `rex8s guard TOOL ARGS…` | the production guard, like `rex8s-guard TOOL ARGS…` (the `kubectl`/`helm`/`flux` links run `rex8s-guard` under the tool's name) |
-| `rex8s list KIND …` · `rex8s freconcile CTX KIND NS NAME` | JSON and one-line answers for launchers ([Raycast](raycast.md)) |
+| `rex8s list KIND …` · `rex8s freconcile CTX KIND NS NAME` | JSON and one-line answers for launchers ([Raycast](raycast.md)) and the palette actions |
 | `rex8s version` · `rex8s help` | the version · every subcommand |
 
 The subcommands that start with `_` (`rex8s _logs`, `_exec`, `_pf`…) are the

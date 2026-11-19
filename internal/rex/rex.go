@@ -106,6 +106,13 @@ func SplitBlock(block, direction string, pct int, focus bool, label string, argv
 	return v.BlockIDs[0], nil
 }
 
+// CloseBlock closes a block of this session. Best effort.
+func CloseBlock(id string) {
+	if id != "" {
+		_ = exec.Command(Bin(), "block", "close", "-s", Session(), id).Run()
+	}
+}
+
 // CloseSelf closes the current block (its tab, when it is the only one).
 func CloseSelf() {
 	if b := Block(); b != "" {

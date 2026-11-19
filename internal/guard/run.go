@@ -75,7 +75,11 @@ func run(tool, bin string, args []string, cfg *config.Config) error {
 	if FluxReverts(tool, p) {
 		notes = append(notes, "reminder: with Flux, manual changes to managed resources are reverted on the next reconcile.")
 	}
-	if err := decide([]string{c.Short}, tool+" "+strings.Join(args, " "), risk == Unknown, notes...); err != nil {
+	preview := func() string {
+		pargs, isDiff := previewArgs(tool, p, args)
+		return runPreview(bin, pargs, isDiff)
+	}
+	if err := decide(cfg, []string{c.Short}, tool+" "+strings.Join(args, " "), risk == Unknown, preview, notes...); err != nil {
 		return err
 	}
 	return exec()

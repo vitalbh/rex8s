@@ -67,6 +67,20 @@ func (a *app) kpf(args []string) error {
 				return fmt.Errorf("bad pid %q", args[1])
 			}
 			return a.registry().Stop(pid)
+		case "--open", "--copy": // kpf --open|--copy PID (the Rex palette)
+			if len(args) < 2 {
+				return errors.New("kpf " + args[0] + " PID")
+			}
+			pid, err := strconv.Atoi(args[1])
+			if err != nil {
+				return fmt.Errorf("bad pid %q", args[1])
+			}
+			for _, e := range a.pfList() {
+				if e.PID == pid {
+					return openOrCopy(e.URL(), args[0] == "--copy" || (e.Kind != "" && !e.Kind.Web()))
+				}
+			}
+			return fmt.Errorf("no port-forward with pid %d", pid)
 		}
 		if f, ok := a.favorite(args[0]); ok {
 			return a.fwd(f.Name)

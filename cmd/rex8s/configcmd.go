@@ -26,6 +26,7 @@ var configKeys = map[string]string{
 	"login_url":        "page kauth opens when a login expired",
 	"notifications":    "true or false: macOS notifications",
 	"guard":            "true (default) or false: the production guard (kubectl/helm/flux, kview, kroll… ask before changing production); rex8s setup applies it",
+	"guard_palette":    "true (default) or false: an agent's or script's production change asks in the Rex palette (allow once / deny) instead of being refused",
 	"watch":            "true (default) or false: kview's tabs and kwarn -A follow the API server live; false: kubectl again and again (was kview_watch)",
 	"wrappers":         "true (default) or false: rex8s setup installs the k* commands (rex8s kview… works either way)",
 	"skip_wrappers":    "list: k* commands setup leaves out, e.g. kns, kctx (config add/remove; rex8s setup applies it)",
@@ -100,7 +101,7 @@ func (a *app) configChange(args []string) error {
 		if listKeys[key] {
 			return fmt.Errorf("%s is a list: rex8s config add %s VALUE", key, key)
 		}
-		if key == "notifications" || key == "guard" || key == "wrappers" || key == "watch" {
+		if key == "notifications" || key == "guard" || key == "guard_palette" || key == "wrappers" || key == "watch" {
 			if _, err := strconv.ParseBool(val); err != nil {
 				return fmt.Errorf("%s: true or false", key)
 			}

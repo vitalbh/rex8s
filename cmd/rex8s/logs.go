@@ -174,6 +174,7 @@ func (a *app) logtail(ctxName, ns, podName, container string, lo logOpts) error 
 		if err := cmd.Wait(); err != nil {
 			why := lastLogLine(strings.TrimSpace(stderr.String()))
 			if kube.AuthExpired(errors.New(why)) {
+				a.offerLogin(c)
 				why = "login expired · run kauth " + c.Short
 			} else if why == "" {
 				why = err.Error()

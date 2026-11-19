@@ -42,6 +42,10 @@ func detectKind(p kube.ServicePort) forward.Kind { return forward.DetectKind(p) 
 // rex8s _pfopen CTX NS SVC PORT (Raycast's Port-forward): the background forward
 // of that service port, opened in the browser when it speaks HTTP.
 func (a *app) pfopen(args []string) error {
+	quiet := len(args) > 0 && args[0] == "--copy" // the Rex palette: a database's URL is copied
+	if quiet {
+		args = args[1:]
+	}
 	if len(args) < 4 {
 		return errors.New("_pfopen CTX NS SVC PORT")
 	}
@@ -72,6 +76,9 @@ func (a *app) pfopen(args []string) error {
 		return err
 	}
 	kind := detectKind(port)
+	if quiet {
+		return openOrCopy(kind.URL(e.Local), !kind.Web())
+	}
 	fmt.Println(kind.URL(e.Local))
 	if kind.Web() && desktop.CanOpen() {
 		return desktop.OpenURL(kind.URL(e.Local))

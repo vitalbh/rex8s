@@ -39,7 +39,8 @@ Details: [In any shell](docs/configuration.md#in-any-shell).
 Every pane is **one cluster**: its own context and namespace, a label that
 says where you are (`PROD use/api`), production tinted red, and a guard that
 asks before `kubectl`/`helm`/`flux` change production — also when an agent or
-a script runs them. The guard is a safety net against slips, not a security
+a script runs them: then the Rex palette asks (on the Mac or the iPhone),
+allow once or deny. The guard is a safety net against slips, not a security
 boundary: a `kubectl` run by its full path, k9s, Lens or other client-go
 programs don't go through it. For a real barrier use RBAC (a read-only
 context for daily work, a separate one with write access) or admission
@@ -64,6 +65,10 @@ Every command, with its options: **[docs/commands.md](docs/commands.md)**.
 **⇧⌘J** picks a cluster for an isolated shell, **⇧⌘M** puts several side by side and `kall` types in all of them; **⇧⌘V** opens `kview` (above) on every cluster, and **⇧⌘I** jumps between a cluster shell and its `kview`
 
 ![rex8s in Rex: Cmd+Shift+J picks a cluster, kfail, Cmd+Shift+M opens clusters side by side, kall runs the same command in all of them](docs/tour.gif)
+
+In Rex's command palette (⇧⌘P, also on the iPhone): **Cluster Health…**, **Pods…**, **Flux Resources…**, port-forwards, unlocking production — each question asked right there
+
+![the Rex palette: Cluster Health, then a cluster's pods, failing first, then its logs](docs/palette-health.gif)
 
 <details>
 <summary><b>See it</b> — recordings of each command</summary>

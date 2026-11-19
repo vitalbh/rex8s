@@ -155,6 +155,8 @@ type warnSeen struct {
 	pruned time.Time
 	// shown, when set, hears of every event printed (the tab status count)
 	shown func(uid string, when time.Time)
+	// expired, when set, hears that the cluster's login expired
+	expired func()
 }
 
 type seenEvent struct {

@@ -8,3 +8,7 @@ login_url: https://login.example.com/
 notifications: false
 ai_command: claude
 prod_background: "#1f1430"   # purple, like the README videos
+forwards:
+  - { name: grafana, cluster: euw, namespace: monitoring, service: grafana, port: 3000 }
+  - { name: alertmanager, cluster: use, namespace: monitoring, service: alertmanager, port: 9093 }
+  - { name: orders-db, cluster: euw, namespace: api, service: orders-db, port: 5432 }

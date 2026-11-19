@@ -884,6 +884,31 @@ def find_columns(res, ctx):
 
 
 # ── main ─────────────────────────────────────────────────────────────────
+DEMO_DIFF = """diff -u -N /tmp/LIVE-2231/apps.v1.Deployment.api.api /tmp/MERGED-2231/apps.v1.Deployment.api.api
+--- /tmp/LIVE-2231/apps.v1.Deployment.api.api
++++ /tmp/MERGED-2231/apps.v1.Deployment.api.api
+@@ -6,7 +6,7 @@
+   name: api
+   namespace: api
+ spec:
+-  replicas: 3
++  replicas: 4
+   selector:
+     matchLabels:
+       app: api
+@@ -18,7 +18,10 @@
+     spec:
+       containers:
+-      - image: ghcr.io/acme/api:1.42.0
++      - image: ghcr.io/acme/api:1.43.0
+         name: api
++        env:
++        - name: FEATURE_CHECKOUT_V2
++          value: "true"
+         ports:
+         - containerPort: 8080"""
+
+
 def main():
     flags, pos, rest = parse(sys.argv[1:])
     ctx = current_context(flags)
@@ -1068,6 +1093,11 @@ def main():
         env_file = os.path.join(STATE, "node-env.sh")
         open(env_file, "w").write(NODE_SHELL)
         os.execvpe("/bin/sh", ["/bin/sh", "-i"], dict(os.environ, PS1="/ # ", ENV=env_file))
+    elif verb == "diff":  # the guard's preview of an apply (palette demo)
+        print(DEMO_DIFF)
+        sys.exit(1)  # like kubectl: differences found
+    elif verb in ("apply", "replace"):
+        print("deployment.apps/api configured")
     elif verb == "patch":
         print("%s/%s patched" % (pos[1] if len(pos) > 1 else "resource", pos[2] if len(pos) > 2 else ""))
     elif verb == "exec" and rest and "-it" not in flags and "-i" not in flags:

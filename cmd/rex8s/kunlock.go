@@ -126,3 +126,33 @@ func listUnlocks() error {
 	}
 	return nil
 }
+
+// paletteUnlock: rex8s _unlock CLUSTER|all DURATION, from the Rex palette's
+// "Unlock Production…" (a person picked the cluster and the time there).
+// Agents still can't: their environment gives them away.
+func (a *app) paletteUnlock(name, dur string) error {
+	if os.Getenv("REX8S_AGENT") != "" || os.Getenv("CLAUDECODE") == "1" {
+		return errors.New("kunlock is for a person: agents can't unlock production")
+	}
+	if _, err := time.ParseDuration(dur); err != nil {
+		return fmt.Errorf("not a duration: %q (e.g. 30m, 2h)", dur)
+	}
+	d, _, err := parseUnlockArgs([]string{dur})
+	if err != nil {
+		return err
+	}
+	short, err := a.unlockTarget(name)
+	if err != nil {
+		return err
+	}
+	if err := guard.Unlock(short, d); err != nil {
+		return err
+	}
+	label := short
+	if short == guard.AllClusters {
+		label = "every cluster"
+	}
+	msg := "unlocked " + label + " until " + time.Now().Add(d).Format("15:04")
+	fmt.Println(msg)
+	return nil
+}

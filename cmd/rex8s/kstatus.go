@@ -71,6 +71,9 @@ func (a *app) kstatus(args []string) error {
 			fmt.Print("\x1b[H\x1b[2J")
 			if state, kind, msg := statusLine(c, secs); state == "blocked" {
 				tab.Blocked(kind, msg)
+				if kind == "auth" {
+					a.offerLogin(c)
+				}
 			} else {
 				tab.Set(state, msg)
 			}

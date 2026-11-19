@@ -45,6 +45,9 @@ func Apply() bool {
 	os.Setenv("REX8S_CONFIG", filepath.Join(dir, "config.yaml"))
 	os.Setenv("REX8S_SOURCE", filepath.Join(dir, "kubeconfig"))
 	os.Setenv("GIT_TERMINAL_PROMPT", "0")
+	// a cache of its own: the real port-forwards, unlocks and audit log
+	// stay out of the recording, and the demo's stay out of real use
+	os.Setenv("XDG_CACHE_HOME", filepath.Join(os.TempDir(), "rex8s-demo-cache"))
 	// never let the real kubeconfig in: keep a pane's "pane.yaml:demo" list,
 	// otherwise use the demo kubeconfig alone
 	if !strings.Contains(os.Getenv("KUBECONFIG"), dir) {

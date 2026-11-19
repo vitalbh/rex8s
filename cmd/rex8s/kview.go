@@ -583,6 +583,7 @@ func (k *kview) noteSkips(skips []fleet.Skip, someAnswered bool) {
 	for _, s := range skips {
 		if s.Expired {
 			expired[s.Cluster.Short] = true
+			k.a.offerLogin(s.Cluster)
 		}
 	}
 	if someAnswered || len(expired) > 0 {

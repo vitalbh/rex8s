@@ -539,6 +539,12 @@ func doctorRex(d *checker) {
 	d.check(true, false, "rex CLI", rb)
 	out, err := exec.Command(rb, "ls", "--json").CombinedOutput()
 	d.check(err == nil, false, "Rex server answers", unless(err == nil, strings.TrimSpace(string(out))))
+	if err == nil {
+		rev := rex.APIRevision()
+		ok := rev >= rex.PromptAPIRevision
+		d.check(ok, true, fmt.Sprintf("palette questions (Rex API revision %d)", rev),
+			unless(ok, "Rex before preview.21: the palette actions open rex8s pickers in a pane, and the guard refuses agents instead of asking in the palette (update Rex, then restart its server)"))
+	}
 	lua, err := os.ReadFile(filepath.Join(rexConfigDir(), "rex8s.lua"))
 	switch {
 	case err != nil:

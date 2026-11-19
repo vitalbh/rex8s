@@ -165,10 +165,12 @@ Changing a cluster
   Kustomization's spec.path tells where.
 - kubectl/helm/flux in this environment go through the rex8s guard. Run without a
   terminal (as an agent does), a command that changes a PRODUCTION cluster (or
-  one the guard doesn't recognize) is refused with a message; so are rex8s
-  commands that change a cluster (kroll --target, krun…). Only after the user
-  explicitly agrees to that exact change, run it again prefixed with
-  REX8S_FORCE=1. If the user unlocked the cluster with kunlock (a time
+  one the guard doesn't recognize) first asks the user in the Rex palette
+  (up to 90s): allowed, it just runs; denied, don't retry it in any form — ask
+  the user what they want instead. Unanswered or without Rex it is refused
+  with a message; so are rex8s commands that change a cluster (kroll
+  --target, krun…). Only after the user explicitly agrees to that exact
+  change, run it again prefixed with REX8S_FORCE=1. If the user unlocked the cluster with kunlock (a time
   window they open themselves), changes go through without the refusal; never
   run kunlock yourself. Every decision is logged in ~/.cache/rex8s/audit.log.
 - Logs and describe output may contain secrets or personal data: don't repeat

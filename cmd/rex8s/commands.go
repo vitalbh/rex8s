@@ -373,10 +373,27 @@ func commandTable() []command {
 		// an older rex8s.lua, or a Rex layout saved before, still runs them.
 		{name: "_fwd", aliases: []string{"fwd"}, args: "NAME", short: "start a favorite forward and open the browser (Rex action k8s_fwd)", hidden: true, pane: true,
 			run: func(a *app, args []string) error {
+				if len(args) > 1 && args[0] == "--copy" { // the Rex palette: a database's URL is copied
+					return a.fwdTo(args[1], true)
+				}
 				if err := need("_fwd", args, 1); err != nil {
 					return err
 				}
 				return a.fwd(args[0])
+			}},
+		{name: "_unlock", args: "CLUSTER|all DURATION", short: "kunlock from the Rex palette (an action a person runs)", hidden: true,
+			run: func(a *app, args []string) error {
+				if err := need("_unlock", args, 2); err != nil {
+					return err
+				}
+				return a.paletteUnlock(args[0], args[1])
+			}},
+		{name: "_flux", args: "CTX KIND NS NAME ACTION", short: "one kflux action (reconcile, suspend…) from the Rex palette", hidden: true, pane: true,
+			run: func(a *app, args []string) error {
+				if err := need("_flux", args, 5); err != nil {
+					return err
+				}
+				return a.fluxOne(args[0], args[1], args[2], args[3], args[4])
 			}},
 		{name: "_warnings", aliases: []string{"warnings"}, args: "CTX [NS]", short: "the Warning events pane of the ⇧⌘K layout", hidden: true, pane: true,
 			run: func(a *app, args []string) error {
@@ -449,7 +466,7 @@ func commandTable() []command {
 			}},
 		{name: "_pf", aliases: []string{"pfbg"}, args: "CTX NS SVC LOCAL:REMOTE KIND", short: "hold a port-forward in the background (started by kpf)", hidden: true,
 			run: func(a *app, args []string) error { return a.pfbg(args) }},
-		{name: "_pfopen", aliases: []string{"pfopen"}, args: "CTX NS SVC PORT", short: "port-forward a service and open it (Rex action k8s_pf)", hidden: true,
+		{name: "_pfopen", aliases: []string{"pfopen"}, args: "[--copy] CTX NS SVC PORT", short: "port-forward a service and open it (Rex action k8s_pf; --copy: the palette, a database's URL copied)", hidden: true,
 			run: func(a *app, args []string) error { return a.pfopen(args) }},
 	}
 }

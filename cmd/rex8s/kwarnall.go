@@ -78,6 +78,7 @@ func (a *app) kwarnAll(names []string) error {
 			defer wg.Done()
 			seen := newWarnSeen() // across watches: a restarted watch relists
 			seen.shown = shown
+			seen.expired = func() { a.offerLogin(c) }
 			if hub != nil && watchWarnings(hub, c, pw, seen, nil) {
 				return
 			}
@@ -96,6 +97,7 @@ func (a *app) kwarnAll(names []string) error {
 					err = cmd.Wait()
 				}
 				if kube.AuthExpired(fmt.Errorf("%s", stderr.String())) {
+					a.offerLogin(c)
 					fmt.Fprintln(pw, tui.Err.Render("login expired: kauth "+c.Short+" — this cluster stops here"))
 					return
 				}
@@ -156,6 +158,9 @@ func watchWarnings(src warnSource, c kube.Context, w io.Writer, seen *warnSeen, 
 		}
 		switch {
 		case err != nil:
+			if kube.AuthExpired(err) && seen.expired != nil {
+				seen.expired()
+			}
 			if why := warnTrouble(c, err); why != failing {
 				fmt.Fprintln(w, why)
 				failing = why

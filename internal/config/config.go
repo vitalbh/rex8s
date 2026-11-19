@@ -86,6 +86,11 @@ type Config struct {
 	// production cluster; kroll, krun, kview… too). Default true; false
 	// turns it off entirely. rex8s setup asks the first time at a terminal.
 	Guard *bool `json:"guard"`
+	// GuardPalette: when a production change has nobody at a terminal to
+	// confirm it (an agent, a script), the guard asks in the Rex command
+	// palette (Mac and iPhone): allow once or deny. Default true; false
+	// refuses at once, as before. Needs Rex with prompts (API revision 17).
+	GuardPalette *bool `json:"guard_palette"`
 	// Watch: the live views (kview's main tabs, kwarn -A) follow the API
 	// server with watches (client-go) instead of running kubectl again and
 	// again. Default true; false goes back to kubectl.
@@ -282,6 +287,10 @@ func (c *Config) LogLinksMode() string {
 // GuardOn reports whether the production guard is on (the default; a nil
 // config too).
 func (c *Config) GuardOn() bool { return c == nil || c.Guard == nil || *c.Guard }
+
+// GuardPaletteOn reports whether the guard may ask in the Rex palette when
+// there is no terminal (the default).
+func (c *Config) GuardPaletteOn() bool { return c == nil || c.GuardPalette == nil || *c.GuardPalette }
 
 // WatchOn reports whether the live views watch the API server (the
 // default): watch, else its old name kview_watch.

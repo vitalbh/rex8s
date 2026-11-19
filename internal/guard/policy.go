@@ -23,8 +23,11 @@ import (
 //  2. The clusters were unlocked with kunlock (unlock.go): go ahead, for
 //     agents too, logged as "unlocked". Only a person can unlock.
 //  3. Nobody at a terminal to confirm: an agent (Claude Code sets CLAUDECODE,
-//     kask sets REX8S_AGENT; Codex, Cursor and scripts have no TTY). Refused
-//     with a message saying how to proceed.
+//     kask sets REX8S_AGENT; Codex, Cursor and scripts have no TTY). The Rex
+//     palette asks (palette.go; guard_palette: false turns it off): Allow
+//     once goes ahead, logged as "approved"; Deny is logged as "denied".
+//     Without Rex, or with no answer, refused with a message saying how to
+//     proceed.
 //  4. Otherwise the user types the production cluster name(s).
 //
 // guard: false in the config turns all of it off: Run and ConfirmChange
@@ -47,6 +50,10 @@ type system struct {
 	stderr   io.Writer                             // where the question goes
 	color    func() bool                           // paint the banner
 	exec     func(bin string, argv []string) error // replaces the process
+	// palette asks in the Rex apps (palette.go): allowed, or why not;
+	// errNoPalette when no app could ask. preview: what the change would do
+	// (preview.go), "" when unknown.
+	palette func(prod []string, what string, maybe bool, preview func() string) (bool, string, error)
 }
 
 var sys = system{
@@ -58,13 +65,16 @@ var sys = system{
 	exec:     func(bin string, argv []string) error { return syscall.Exec(bin, argv, os.Environ()) },
 }
 
+func init() { sys.palette = askPalette } // askPalette reads sys itself
+
 func unattended() bool {
 	return sys.getenv("REX8S_AGENT") != "" || sys.getenv("CLAUDECODE") == "1" || !sys.stdinTTY()
 }
 
 // decide applies the policy to a change (what) on the production clusters
 // prod (short names). maybe: the guard can't tell whether it changes anything.
-func decide(prod []string, what string, maybe bool, notes ...string) error {
+// preview (may be nil) tells what it would do, for the Rex palette.
+func decide(cfg *config.Config, prod []string, what string, maybe bool, preview func() string, notes ...string) error {
 	who := strings.Join(prod, ",")
 	if sys.getenv("REX8S_FORCE") != "" {
 		audit(who, "forced", what)
@@ -75,7 +85,24 @@ func decide(prod []string, what string, maybe bool, notes ...string) error {
 		return nil
 	}
 	if unattended() {
-		audit(who, "refused", what)
+		why := ""
+		if cfg.GuardPaletteOn() && sys.palette != nil {
+			allowed, reason, err := sys.palette(prod, what, maybe, preview)
+			switch {
+			case err != nil: // nobody could be asked: refused as always
+			case allowed:
+				audit(who, "approved", what)
+				return nil
+			case reason == "deny":
+				audit(who, "denied", what)
+				return fmt.Errorf("%w: the user denied it in the Rex palette: %s on the PRODUCTION cluster %s.\n"+
+					"An agent: don't retry it (not with REX8S_FORCE either); ask the user what they want instead.",
+					ErrRefused, what, strings.Join(prod, ", "))
+			default:
+				why = " (asked in the Rex palette: " + reason + ")"
+			}
+		}
+		audit(who, "refused", what+why)
 		verb := "would change"
 		if maybe {
 			verb = "may change"
@@ -84,11 +111,11 @@ func decide(prod []string, what string, maybe bool, notes ...string) error {
 		if len(prod) > 1 {
 			cluster = "clusters"
 		}
-		return fmt.Errorf("%w: %s %s the PRODUCTION %s %s, and there is no terminal to confirm it.\n"+
+		return fmt.Errorf("%w: %s %s the PRODUCTION %s %s, and there is no terminal to confirm it%s.\n"+
 			"An agent: ask the user first; only if they agree to this exact change, run it again prefixed with REX8S_FORCE=1\n"+
 			"(or the user can run kunlock in their terminal to let changes to this cluster through for a while).\n"+
 			"A script: prefix it with REX8S_FORCE=1.",
-			ErrRefused, what, verb, cluster, strings.Join(prod, ", "))
+			ErrRefused, what, verb, cluster, strings.Join(prod, ", "), why)
 	}
 	if !ask(prod, what, notes...) {
 		audit(who, "cancelled", what)
@@ -111,7 +138,7 @@ func ConfirmChange(cfg *config.Config, clusters []kube.Context, what string, not
 	if len(prod) == 0 || !cfg.GuardOn() {
 		return nil
 	}
-	return decide(prod, what, false, notes...)
+	return decide(cfg, prod, what, false, nil, notes...)
 }
 
 // ProdShorts: the short names of the production clusters among cs, sorted,
